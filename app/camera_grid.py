@@ -1,19 +1,96 @@
-"""Grid view of camera tiles with click-to-maximize."""
+"""Grid view of camera tiles with click-to-maximize.
+
+Tiles are sized to preserve a fixed aspect ratio (16:9 by default), so the
+grid never stretches a tile vertically. Both column and row counts are
+honored: rows are computed from camera count and the chosen column count.
+"""
 from __future__ import annotations
 
 from typing import Optional
 
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QGridLayout, QStackedLayout, QWidget
+from PyQt6.QtGui import QResizeEvent
+from PyQt6.QtWidgets import QStackedLayout, QWidget
 
 from .camera_tile import CameraTile
 from .config import Camera, Settings
 
 
+class AspectGrid(QWidget):
+    """Lays out children in a grid, keeping each cell at a fixed aspect ratio."""
+
+    def __init__(self, parent: Optional[QWidget] = None, aspect: float = 16 / 9,
+                 columns: int = 2, spacing: int = 12, margin: int = 12) -> None:
+        super().__init__(parent)
+        self._tiles: list[QWidget] = []
+        self._aspect = aspect
+        self._columns = max(1, columns)
+        self._spacing = spacing
+        self._margin = margin
+
+    def set_tiles(self, tiles: list[QWidget]) -> None:
+        # Detach previous children we still own.
+        for t in self._tiles:
+            if t not in tiles:
+                t.setParent(None)
+        self._tiles = list(tiles)
+        for t in self._tiles:
+            t.setParent(self)
+            t.show()
+        self._relayout()
+
+    def set_columns(self, columns: int) -> None:
+        self._columns = max(1, columns)
+        self._relayout()
+
+    def set_aspect(self, aspect: float) -> None:
+        self._aspect = max(0.1, aspect)
+        self._relayout()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._relayout()
+
+    def _relayout(self) -> None:
+        n = len(self._tiles)
+        if n == 0 or self.width() <= 0 or self.height() <= 0:
+            return
+
+        cols = min(self._columns, n)
+        rows = (n + cols - 1) // cols
+
+        avail_w = self.width() - 2 * self._margin
+        avail_h = self.height() - 2 * self._margin
+        if avail_w <= 0 or avail_h <= 0:
+            return
+
+        # Try to fit by width first.
+        cell_w = (avail_w - (cols - 1) * self._spacing) / cols
+        cell_h = cell_w / self._aspect
+
+        # If that overflows vertically, fit by height instead.
+        total_h = cell_h * rows + (rows - 1) * self._spacing
+        if total_h > avail_h:
+            cell_h = (avail_h - (rows - 1) * self._spacing) / rows
+            cell_w = cell_h * self._aspect
+
+        total_w = cell_w * cols + (cols - 1) * self._spacing
+        total_h = cell_h * rows + (rows - 1) * self._spacing
+
+        offset_x = (self.width() - total_w) / 2
+        offset_y = (self.height() - total_h) / 2
+
+        for i, tile in enumerate(self._tiles):
+            r, c = divmod(i, cols)
+            x = offset_x + c * (cell_w + self._spacing)
+            y = offset_y + r * (cell_h + self._spacing)
+            tile.setGeometry(int(x), int(y), int(cell_w), int(cell_h))
+
+
 class CameraGrid(QWidget):
     """Holds CameraTile widgets in a grid; supports maximizing one tile."""
 
-    selection_changed = pyqtSignal(str)  # camera id or "" when not maximized
+    selection_changed = pyqtSignal(str)
 
     def __init__(self, settings: Settings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -25,15 +102,8 @@ class CameraGrid(QWidget):
         self._stack.setStackingMode(QStackedLayout.StackingMode.StackOne)
         self._stack.setContentsMargins(0, 0, 0, 0)
 
-        self._grid_host = QWidget(self)
-        self._grid_layout = QGridLayout(self._grid_host)
-        self._grid_layout.setContentsMargins(12, 12, 12, 12)
-        self._grid_layout.setSpacing(12)
-
-        self._max_host = QWidget(self)
-        self._max_layout = QGridLayout(self._max_host)
-        self._max_layout.setContentsMargins(12, 12, 12, 12)
-        self._max_layout.setSpacing(0)
+        self._grid_host = AspectGrid(columns=settings.grid_columns)
+        self._max_host = AspectGrid(columns=1)
 
         self._stack.addWidget(self._grid_host)
         self._stack.addWidget(self._max_host)
@@ -45,14 +115,12 @@ class CameraGrid(QWidget):
         existing = set(self._tiles.keys())
         incoming = {c.id for c in cameras}
 
-        # Remove tiles for cameras no longer present.
         for cam_id in existing - incoming:
             tile = self._tiles.pop(cam_id)
             tile.stop()
             tile.setParent(None)
             tile.deleteLater()
 
-        # Add or update.
         for cam in cameras:
             tile = self._tiles.get(cam.id)
             if tile is None:
@@ -74,13 +142,14 @@ class CameraGrid(QWidget):
             self._stack.setCurrentIndex(0)
             self.selection_changed.emit("")
 
-        self._relayout()
+        self._refresh_layout()
 
     def apply_settings(self, settings: Settings) -> None:
         self._settings = settings
         for tile in self._tiles.values():
             tile.set_show_overlay(settings.show_overlay)
-        self._relayout()
+        self._grid_host.set_columns(settings.grid_columns)
+        self._refresh_layout()
 
     def stop_all(self) -> None:
         for tile in self._tiles.values():
@@ -93,11 +162,12 @@ class CameraGrid(QWidget):
         if camera_id not in self._tiles:
             return
         self._maximized_id = camera_id
-        # Detach all tiles from grid, attach selected one to max layout.
-        self._clear_layout(self._max_layout)
         tile = self._tiles[camera_id]
-        tile.setParent(self._max_host)
-        self._max_layout.addWidget(tile, 0, 0)
+        # Move tile into the maximize host.
+        self._grid_host.set_tiles(
+            [t for t in self._tiles.values() if t is not tile]
+        )
+        self._max_host.set_tiles([tile])
         self._stack.setCurrentIndex(1)
         self.selection_changed.emit(camera_id)
 
@@ -105,8 +175,9 @@ class CameraGrid(QWidget):
         if self._maximized_id is None:
             return
         self._maximized_id = None
+        self._max_host.set_tiles([])
         self._stack.setCurrentIndex(0)
-        self._relayout()
+        self._refresh_layout()
         self.selection_changed.emit("")
 
     def toggle_maximize(self, camera_id: str) -> None:
@@ -123,32 +194,15 @@ class CameraGrid(QWidget):
     def _on_tile_double_clicked(self, camera_id: str) -> None:
         self.toggle_maximize(camera_id)
 
-    def _clear_layout(self, layout: QGridLayout) -> None:
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-
-    def _relayout(self) -> None:
-        if self._maximized_id is not None:
-            return
-        self._clear_layout(self._grid_layout)
-        cols = max(1, self._settings.grid_columns)
-        tiles = list(self._tiles.values())
-        if not tiles:
-            return
-        for idx, tile in enumerate(tiles):
-            row, col = divmod(idx, cols)
-            tile.setParent(self._grid_host)
-            tile.show()
-            self._grid_layout.addWidget(tile, row, col)
-        # Keep columns evenly stretched.
-        for c in range(cols):
-            self._grid_layout.setColumnStretch(c, 1)
-        rows = (len(tiles) + cols - 1) // cols
-        for r in range(rows):
-            self._grid_layout.setRowStretch(r, 1)
+    def _refresh_layout(self) -> None:
+        if self._maximized_id is None:
+            self._grid_host.set_tiles(list(self._tiles.values()))
+        else:
+            tile = self._tiles.get(self._maximized_id)
+            others = [t for t in self._tiles.values() if t is not tile]
+            self._grid_host.set_tiles(others)
+            if tile is not None:
+                self._max_host.set_tiles([tile])
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape and self._maximized_id is not None:

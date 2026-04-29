@@ -274,16 +274,22 @@ class CameraTile(QWidget):
         if abs(new_zoom - self._zoom) < 1e-3:
             return
 
-        # Zoom toward the cursor: keep the point under the cursor stationary.
-        rect = QRectF(self.rect())
-        center = rect.center()
-        cursor = QPointF(event.position())
-        # Current image-space offset from center to cursor:
-        offset = (cursor - center) - self._pan
         scale_change = new_zoom / self._zoom
-        self._pan = (cursor - center) - offset * scale_change
+
+        if delta > 0:
+            # Zoom in: anchor on cursor so the point under the cursor stays put.
+            rect = QRectF(self.rect())
+            center = rect.center()
+            cursor = QPointF(event.position())
+            offset = (cursor - center) - self._pan
+            self._pan = (cursor - center) - offset * scale_change
+        else:
+            # Zoom out: scale pan toward 0 so the image re-centers smoothly.
+            self._pan = QPointF(self._pan.x() * scale_change, self._pan.y() * scale_change)
+
         self._zoom = new_zoom
         if self._zoom <= 1.0001:
+            self._zoom = 1.0
             self._pan = QPointF(0.0, 0.0)
         self.update()
         event.accept()
