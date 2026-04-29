@@ -1,0 +1,198 @@
+"""Apple-inspired QSS for a modern, clean look."""
+from __future__ import annotations
+
+# Color palette inspired by macOS Sonoma / Ventura dark appearance.
+COLORS = {
+    "bg":            "#1c1c1e",
+    "bg_elevated":   "#2c2c2e",
+    "bg_hover":      "#3a3a3c",
+    "border":        "#3a3a3c",
+    "text":          "#f2f2f7",
+    "text_muted":    "#9a9aa0",
+    "accent":        "#0a84ff",
+    "accent_hover":  "#3a9bff",
+    "danger":        "#ff453a",
+    "success":       "#30d158",
+}
+
+APP_STYLESHEET = f"""
+* {{
+    color: {COLORS['text']};
+    font-family: "SF Pro Display", "Inter", "Segoe UI Variable", "Segoe UI", sans-serif;
+}}
+
+QMainWindow, QDialog {{
+    background-color: {COLORS['bg']};
+}}
+
+QWidget#Sidebar {{
+    background-color: {COLORS['bg_elevated']};
+    border-right: 1px solid {COLORS['border']};
+}}
+
+QLabel#TitleLabel {{
+    font-size: 18px;
+    font-weight: 600;
+    padding: 4px 2px;
+}}
+
+QLabel#SectionLabel {{
+    font-size: 11px;
+    font-weight: 600;
+    color: {COLORS['text_muted']};
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 8px 2px 4px 2px;
+}}
+
+QLabel#MutedLabel {{
+    color: {COLORS['text_muted']};
+    font-size: 12px;
+}}
+
+QPushButton {{
+    background-color: {COLORS['bg_hover']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-size: 13px;
+}}
+QPushButton:hover {{
+    background-color: #48484a;
+}}
+QPushButton:pressed {{
+    background-color: #5a5a5c;
+}}
+QPushButton:disabled {{
+    color: {COLORS['text_muted']};
+    background-color: #2a2a2c;
+}}
+
+QPushButton#PrimaryButton {{
+    background-color: {COLORS['accent']};
+    border: none;
+    color: white;
+    font-weight: 600;
+}}
+QPushButton#PrimaryButton:hover {{
+    background-color: {COLORS['accent_hover']};
+}}
+
+QPushButton#DangerButton {{
+    background-color: transparent;
+    border: 1px solid {COLORS['danger']};
+    color: {COLORS['danger']};
+}}
+QPushButton#DangerButton:hover {{
+    background-color: rgba(255, 69, 58, 0.18);
+}}
+
+QPushButton#IconButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 6px 10px;
+    color: {COLORS['text_muted']};
+    font-size: 16px;
+}}
+QPushButton#IconButton:hover {{
+    background-color: {COLORS['bg_hover']};
+    color: {COLORS['text']};
+}}
+
+QListWidget {{
+    background-color: transparent;
+    border: none;
+    outline: 0;
+    padding: 4px;
+}}
+QListWidget::item {{
+    background-color: transparent;
+    border-radius: 8px;
+    padding: 10px 12px;
+    margin: 2px 0;
+    color: {COLORS['text']};
+}}
+QListWidget::item:hover {{
+    background-color: {COLORS['bg_hover']};
+}}
+QListWidget::item:selected {{
+    background-color: {COLORS['accent']};
+    color: white;
+}}
+
+QLineEdit, QSpinBox, QComboBox {{
+    background-color: {COLORS['bg']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    padding: 8px 10px;
+    selection-background-color: {COLORS['accent']};
+    font-size: 13px;
+}}
+QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
+    border: 1px solid {COLORS['accent']};
+}}
+
+QComboBox::drop-down {{
+    border: none;
+    width: 24px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {COLORS['bg_elevated']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    selection-background-color: {COLORS['accent']};
+    padding: 4px;
+}}
+
+QCheckBox {{
+    spacing: 8px;
+    font-size: 13px;
+}}
+QCheckBox::indicator {{
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    border: 1px solid {COLORS['border']};
+    background: {COLORS['bg']};
+}}
+QCheckBox::indicator:checked {{
+    background: {COLORS['accent']};
+    border: 1px solid {COLORS['accent']};
+}}
+
+QScrollArea {{
+    background: transparent;
+    border: none;
+}}
+QScrollBar:vertical {{
+    background: transparent;
+    width: 10px;
+    margin: 4px;
+}}
+QScrollBar::handle:vertical {{
+    background: #4a4a4c;
+    border-radius: 4px;
+    min-height: 20px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: #5a5a5c;
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+
+QStatusBar {{
+    background-color: {COLORS['bg_elevated']};
+    color: {COLORS['text_muted']};
+    border-top: 1px solid {COLORS['border']};
+}}
+
+QToolTip {{
+    background-color: {COLORS['bg_elevated']};
+    color: {COLORS['text']};
+    border: 1px solid {COLORS['border']};
+    padding: 6px 8px;
+    border-radius: 6px;
+}}
+"""
