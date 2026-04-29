@@ -10,7 +10,6 @@ os.environ.setdefault(
     "rtsp_transport;tcp|stimeout;5000000|max_delay;500000|buffer_size;1024000",
 )
 
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication
 
@@ -19,9 +18,7 @@ from app.styles import APP_STYLESHEET
 
 
 def main() -> int:
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    QApplication.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-
+    # High-DPI scaling is enabled by default in PyQt6; no setAttribute needed.
     app = QApplication(sys.argv)
     app.setApplicationName("Tapo Viewer")
     app.setOrganizationName("TapoViewer")
