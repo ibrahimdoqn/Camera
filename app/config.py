@@ -54,6 +54,7 @@ class Settings:
     decode_width: int = 0  # 0 = native
     reconnect_delay: float = 3.0
     show_overlay: bool = True
+    sidebar_collapsed: bool = False
 
 
 @dataclass

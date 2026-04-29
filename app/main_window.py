@@ -1,9 +1,10 @@
-"""Main application window: sidebar + camera grid."""
+"""Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -11,6 +12,7 @@ from PyQt6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
     QStatusBar,
     QVBoxLayout,
@@ -20,6 +22,11 @@ from PyQt6.QtWidgets import (
 from .camera_grid import CameraGrid
 from .config import AppConfig, Camera, load_config, save_config
 from .dialogs import CameraDialog, SettingsDialog
+from .ptz_panel import PtzPanel
+
+
+SIDEBAR_WIDTH = 280
+SIDEBAR_COLLAPSED_WIDTH = 48
 
 
 class MainWindow(QMainWindow):
@@ -27,77 +34,124 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Tapo Viewer")
         self.resize(1280, 800)
-        self.setMinimumSize(QSize(960, 600))
+        self.setMinimumSize(QSize(720, 600))
 
         self._config: AppConfig = load_config()
+        self._collapsed: bool = bool(self._config.settings.sidebar_collapsed)
 
-        # ---- Sidebar ----
-        sidebar = QWidget()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(280)
+        # ---- Sidebar shell ----
+        self.sidebar = QWidget()
+        self.sidebar.setObjectName("Sidebar")
+        self.sidebar.setFixedWidth(
+            SIDEBAR_COLLAPSED_WIDTH if self._collapsed else SIDEBAR_WIDTH
+        )
 
-        title = QLabel("Tapo Viewer")
-        title.setObjectName("TitleLabel")
+        # Header row: title + toggle button.
+        self.toggle_btn = QPushButton("☰")
+        self.toggle_btn.setObjectName("IconButton")
+        self.toggle_btn.setFixedSize(32, 32)
+        self.toggle_btn.setToolTip("Kenar çubuğunu daralt/genişlet")
+        self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_btn.clicked.connect(self._toggle_sidebar)
 
-        cameras_label = QLabel("Kameralar")
-        cameras_label.setObjectName("SectionLabel")
+        self.title_label = QLabel("Tapo Viewer")
+        self.title_label.setObjectName("TitleLabel")
+
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+        header_row.addWidget(self.toggle_btn)
+        header_row.addWidget(self.title_label, 1)
+
+        # Body widgets (hidden when collapsed).
+        self.cameras_label = QLabel("Kameralar")
+        self.cameras_label.setObjectName("SectionLabel")
 
         self.list_widget = QListWidget()
         self.list_widget.itemSelectionChanged.connect(self._on_list_selection)
         self.list_widget.itemDoubleClicked.connect(self._on_list_double_clicked)
 
-        add_btn = QPushButton("+ Kamera Ekle")
-        add_btn.setObjectName("PrimaryButton")
-        add_btn.clicked.connect(self._on_add_camera)
+        self.add_btn = QPushButton("+ Kamera Ekle")
+        self.add_btn.setObjectName("PrimaryButton")
+        self.add_btn.clicked.connect(self._on_add_camera)
 
-        edit_btn = QPushButton("Düzenle")
-        edit_btn.clicked.connect(self._on_edit_camera)
-        self.edit_btn = edit_btn
+        self.edit_btn = QPushButton("Düzenle")
+        self.edit_btn.clicked.connect(self._on_edit_camera)
 
-        remove_btn = QPushButton("Kaldır")
-        remove_btn.setObjectName("DangerButton")
-        remove_btn.clicked.connect(self._on_remove_camera)
-        self.remove_btn = remove_btn
+        self.remove_btn = QPushButton("Kaldır")
+        self.remove_btn.setObjectName("DangerButton")
+        self.remove_btn.clicked.connect(self._on_remove_camera)
 
         edit_row = QHBoxLayout()
         edit_row.setSpacing(8)
-        edit_row.addWidget(edit_btn)
-        edit_row.addWidget(remove_btn)
+        edit_row.addWidget(self.edit_btn)
+        edit_row.addWidget(self.remove_btn)
 
-        view_label = QLabel("Görünüm")
-        view_label.setObjectName("SectionLabel")
+        self.view_label = QLabel("Görünüm")
+        self.view_label.setObjectName("SectionLabel")
 
-        grid_row = QHBoxLayout()
-        grid_row.setSpacing(8)
-        grid_row.addWidget(QLabel("Sütun"))
+        # Grid presets (1x1, 2x2, 3x3, 4x4).
+        self._preset_buttons: dict[int, QPushButton] = {}
+        preset_row = QHBoxLayout()
+        preset_row.setSpacing(6)
+        for n in (1, 2, 3, 4):
+            btn = QPushButton(f"{n}×{n}")
+            btn.setObjectName("PresetButton")
+            btn.setCheckable(True)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            btn.clicked.connect(lambda _checked=False, val=n: self._on_preset_clicked(val))
+            self._preset_buttons[n] = btn
+            preset_row.addWidget(btn)
+
+        # Custom column count (for non-NxN layouts).
+        col_row = QHBoxLayout()
+        col_row.setSpacing(8)
+        self.col_label = QLabel("Sütun")
+        col_row.addWidget(self.col_label)
         self.grid_spin = QSpinBox()
         self.grid_spin.setRange(1, 8)
         self.grid_spin.setValue(self._config.settings.grid_columns)
         self.grid_spin.valueChanged.connect(self._on_grid_columns_changed)
-        grid_row.addWidget(self.grid_spin, 1)
+        col_row.addWidget(self.grid_spin, 1)
 
         self.restore_btn = QPushButton("Tüm Izgara")
         self.restore_btn.clicked.connect(self._on_restore)
         self.restore_btn.setEnabled(False)
 
-        settings_btn = QPushButton("Ayarlar")
-        settings_btn.clicked.connect(self._on_open_settings)
+        self.settings_btn = QPushButton("Ayarlar")
+        self.settings_btn.clicked.connect(self._on_open_settings)
 
-        sidebar_layout = QVBoxLayout(sidebar)
-        sidebar_layout.setContentsMargins(16, 18, 16, 16)
+        # PTZ panel.
+        self.ptz_panel = PtzPanel()
+
+        # Layout.
+        sidebar_layout = QVBoxLayout(self.sidebar)
+        sidebar_layout.setContentsMargins(8, 12, 8, 12)
         sidebar_layout.setSpacing(8)
-        sidebar_layout.addWidget(title)
-        sidebar_layout.addSpacing(8)
-        sidebar_layout.addWidget(cameras_label)
-        sidebar_layout.addWidget(self.list_widget, 1)
-        sidebar_layout.addWidget(add_btn)
-        sidebar_layout.addLayout(edit_row)
-        sidebar_layout.addSpacing(6)
-        sidebar_layout.addWidget(view_label)
-        sidebar_layout.addLayout(grid_row)
-        sidebar_layout.addWidget(self.restore_btn)
-        sidebar_layout.addSpacing(6)
-        sidebar_layout.addWidget(settings_btn)
+        sidebar_layout.addLayout(header_row)
+
+        # Wrap the body so we can hide/show it as a single unit.
+        self.body_widget = QWidget()
+        body_layout = QVBoxLayout(self.body_widget)
+        body_layout.setContentsMargins(8, 6, 8, 0)
+        body_layout.setSpacing(8)
+        body_layout.addWidget(self.cameras_label)
+        body_layout.addWidget(self.list_widget, 1)
+        body_layout.addWidget(self.add_btn)
+        body_layout.addLayout(edit_row)
+        body_layout.addSpacing(4)
+        body_layout.addWidget(self.view_label)
+        body_layout.addLayout(preset_row)
+        body_layout.addLayout(col_row)
+        body_layout.addWidget(self.restore_btn)
+        body_layout.addSpacing(4)
+        body_layout.addWidget(self._make_separator())
+        body_layout.addWidget(self.ptz_panel)
+        body_layout.addStretch(0)
+        body_layout.addWidget(self.settings_btn)
+
+        sidebar_layout.addWidget(self.body_widget, 1)
 
         # ---- Grid ----
         self.grid = CameraGrid(settings=self._config.settings)
@@ -107,7 +161,7 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(sidebar)
+        layout.addWidget(self.sidebar)
         layout.addWidget(self.grid, 1)
         self.setCentralWidget(central)
 
@@ -120,13 +174,24 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add_camera)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self._on_open_settings)
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_sidebar)
 
         self._refresh_camera_list()
         self.grid.set_cameras(self._config.cameras)
         self._update_button_states()
+        self._update_preset_states()
+        self._apply_collapsed_state()
         self._update_status()
 
     # -- helpers --
+
+    def _make_separator(self) -> QFrame:
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setFrameShadow(QFrame.Shadow.Plain)
+        sep.setObjectName("Separator")
+        sep.setFixedHeight(1)
+        return sep
 
     def _refresh_camera_list(self) -> None:
         self.list_widget.blockSignals(True)
@@ -153,16 +218,41 @@ class MainWindow(QMainWindow):
         self.edit_btn.setEnabled(has_selection)
         self.remove_btn.setEnabled(has_selection)
 
+    def _update_preset_states(self) -> None:
+        cols = self._config.settings.grid_columns
+        for n, btn in self._preset_buttons.items():
+            btn.setChecked(n == cols)
+
     def _update_status(self) -> None:
         n = len(self._config.cameras)
+        cols = self._config.settings.grid_columns
+        rows = max(1, (n + cols - 1) // cols) if n else 1
         self._status_label.setText(
-            f"{n} kamera   ·   {self._config.settings.grid_columns} sütun   ·   {self._config.settings.target_fps} FPS"
+            f"{n} kamera   ·   {cols}×{rows} ızgara   ·   {self._config.settings.target_fps} FPS"
         )
+
+    def _apply_collapsed_state(self) -> None:
+        self.sidebar.setFixedWidth(
+            SIDEBAR_COLLAPSED_WIDTH if self._collapsed else SIDEBAR_WIDTH
+        )
+        self.body_widget.setVisible(not self._collapsed)
+        self.title_label.setVisible(not self._collapsed)
+        self.toggle_btn.setText("›" if self._collapsed else "☰")
+        self.toggle_btn.setToolTip(
+            "Kenar çubuğunu genişlet" if self._collapsed else "Kenar çubuğunu daralt"
+        )
+
+    def _toggle_sidebar(self) -> None:
+        self._collapsed = not self._collapsed
+        self._config.settings.sidebar_collapsed = self._collapsed
+        self._save()
+        self._apply_collapsed_state()
 
     # -- handlers --
 
     def _on_list_selection(self) -> None:
         self._update_button_states()
+        self.ptz_panel.set_camera(self._selected_camera())
 
     def _on_list_double_clicked(self, item: QListWidgetItem) -> None:
         cam_id = item.data(Qt.ItemDataRole.UserRole)
@@ -196,6 +286,9 @@ class MainWindow(QMainWindow):
             self._save()
             self._refresh_camera_list()
             self.grid.set_cameras(self._config.cameras)
+            # Refresh PTZ binding if the edited camera is the selected one.
+            if self._selected_camera() and self._selected_camera().id == updated.id:
+                self.ptz_panel.set_camera(self._selected_camera())
 
     def _on_remove_camera(self) -> None:
         cam = self._selected_camera()
@@ -213,12 +306,28 @@ class MainWindow(QMainWindow):
         self._save()
         self._refresh_camera_list()
         self.grid.set_cameras(self._config.cameras)
+        self.ptz_panel.set_camera(self._selected_camera())
         self._update_status()
 
     def _on_grid_columns_changed(self, value: int) -> None:
         self._config.settings.grid_columns = value
         self._save()
         self.grid.apply_settings(self._config.settings)
+        self._update_preset_states()
+        self._update_status()
+
+    def _on_preset_clicked(self, n: int) -> None:
+        if self._config.settings.grid_columns == n:
+            # Re-check the active button so the user gets visible feedback.
+            self._update_preset_states()
+            return
+        self.grid_spin.blockSignals(True)
+        self.grid_spin.setValue(n)
+        self.grid_spin.blockSignals(False)
+        self._config.settings.grid_columns = n
+        self._save()
+        self.grid.apply_settings(self._config.settings)
+        self._update_preset_states()
         self._update_status()
 
     def _on_open_settings(self) -> None:
@@ -226,6 +335,8 @@ class MainWindow(QMainWindow):
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             new_settings = dlg.result_settings()
             target_fps_changed = new_settings.target_fps != self._config.settings.target_fps
+            # Preserve sidebar state across settings changes.
+            new_settings.sidebar_collapsed = self._config.settings.sidebar_collapsed
             self._config.settings = new_settings
             self.grid_spin.blockSignals(True)
             self.grid_spin.setValue(new_settings.grid_columns)
@@ -233,9 +344,9 @@ class MainWindow(QMainWindow):
             self._save()
             self.grid.apply_settings(new_settings)
             if target_fps_changed:
-                # FPS change requires restarting workers.
                 self.grid.stop_all()
                 self.grid.set_cameras(self._config.cameras)
+            self._update_preset_states()
             self._update_status()
 
     def _on_grid_selection_changed(self, camera_id: str) -> None:
@@ -251,6 +362,7 @@ class MainWindow(QMainWindow):
     # -- close --
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        self.ptz_panel.shutdown()
         self.grid.stop_all()
         self._save()
         super().closeEvent(event)

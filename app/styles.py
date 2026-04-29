@@ -100,6 +100,46 @@ QPushButton#IconButton:hover {{
     color: {COLORS['text']};
 }}
 
+QPushButton#PresetButton {{
+    padding: 6px 4px;
+    font-size: 12px;
+    font-weight: 600;
+}}
+QPushButton#PresetButton:checked {{
+    background-color: {COLORS['accent']};
+    border: 1px solid {COLORS['accent']};
+    color: white;
+}}
+
+QPushButton#PtzButton {{
+    background-color: {COLORS['bg']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    padding: 4px;
+    font-size: 14px;
+    font-weight: 600;
+}}
+QPushButton#PtzButton:hover {{
+    background-color: {COLORS['bg_hover']};
+    border: 1px solid {COLORS['accent']};
+}}
+QPushButton#PtzButton:pressed {{
+    background-color: {COLORS['accent']};
+    color: white;
+    border: 1px solid {COLORS['accent']};
+}}
+QPushButton#PtzButton:disabled {{
+    color: {COLORS['text_muted']};
+    background-color: #2a2a2c;
+    border: 1px solid #333335;
+}}
+
+QFrame#Separator {{
+    background-color: {COLORS['border']};
+    border: none;
+    max-height: 1px;
+}}
+
 QListWidget {{
     background-color: transparent;
     border: none;
