@@ -20,12 +20,37 @@ Sadece izleme odaklıdır. Hareket veya kişi algılama gibi özellikler içerme
 
 > Python 3.10+ gerekir. Windows 11'de FFmpeg, `opencv-python` ile birlikte gelir; ayrıca yüklemek gerekmez.
 
+### Önerilen: tek tıkla başlatma (izole `.venv` ile)
+
+Sistemdeki diğer Python paketleriyle çakışmaması için uygulama kendi sanal ortamında (`.venv`) çalışır. İlk çalıştırmada otomatik olarak `.venv` oluşturulur ve bağımlılıklar yalnızca o dizine kurulur — sistem Python'ınız etkilenmez.
+
+**Komut isteminden:**
+
+```cmd
+run.bat
+```
+
+**PowerShell'den:**
+
+```powershell
+.\run.ps1
+```
+
+> Not: PowerShell scriptlerinin çalışmasına izin verilmiyorsa bir kerelik şu komutu çalıştırın:
+> `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`
+
+`run.bat` / `run.ps1` her başlatmada `requirements.txt` değişip değişmediğini kontrol eder; sadece değişmişse `pip install` çalıştırır, aksi halde doğrudan uygulamayı başlatır.
+
+### Manuel kurulum
+
 ```powershell
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 python main.py
 ```
+
+`.venv` klasörü `.gitignore` ile dışlanmıştır ve repodan ayrı kalır.
 
 ## Tapo Kameralar İçin RTSP Hesabı
 
