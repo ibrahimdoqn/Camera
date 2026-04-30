@@ -223,31 +223,41 @@ class CameraTile(QWidget):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
         radius = 14
-        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        # Inset the rect by half the (eventual) pen width so the border stays
+        # entirely inside the widget's geometry — otherwise the 2 px selection
+        # outline bleeds outside the rounded corners and clips against the
+        # neighbouring tile.
+        pen_width = 2 if self._selected else 1
+        inset = pen_width / 2.0
+        rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
+        inner_radius = radius - inset
 
         # Background card.
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#0e0e10"))
-        painter.drawRoundedRect(rect, radius, radius)
+        painter.drawRoundedRect(rect, inner_radius, inner_radius)
 
-        painter.setClipPath(self._rounded_path(rect, radius))
+        painter.setClipPath(self._rounded_path(rect, inner_radius))
 
         if self._pixmap is not None and not self._pixmap.isNull():
             self._draw_video(painter, rect)
         else:
             self._draw_placeholder(painter, rect)
 
+        if self._show_overlay:
+            # Draw the overlay while still clipped so the chip can never
+            # extend past the rounded corners.
+            self._draw_overlay(painter, rect)
+
         painter.setClipping(False)
 
         # Border (highlighted when selected).
         pen = QPen(QColor("#0a84ff" if self._selected else "#2c2c2e"))
-        pen.setWidth(2 if self._selected else 1)
+        pen.setWidth(pen_width)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect, radius, radius)
-
-        if self._show_overlay:
-            self._draw_overlay(painter, rect)
+        painter.drawRoundedRect(rect, inner_radius, inner_radius)
 
     def _rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
         path = QPainterPath()
@@ -301,43 +311,51 @@ class CameraTile(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, msg)
 
     def _draw_overlay(self, painter: QPainter, rect: QRectF) -> None:
-        # Top-left: camera name with status dot.
-        margin = 12
+        # Top-left: camera name with status dot. Pull the chip in past the
+        # rounded corner radius so it never sits on the curve.
+        margin = 16
         font = QFont(painter.font())
-        font.setPointSize(10)
+        font.setPointSize(11)
         font.setWeight(QFont.Weight.DemiBold)
         painter.setFont(font)
 
-        name = self.camera.name or self.camera.host
-        text_rect = painter.fontMetrics().boundingRect(name)
-        chip_w = text_rect.width() + 36
-        chip_h = 26
+        name = self.camera.name or self.camera.host or "Kamera"
+        text_w = painter.fontMetrics().horizontalAdvance(name)
+        chip_h = 30
+        dot_d = 8
+        # left padding | dot | gap | text | right padding
+        chip_w = 14 + dot_d + 8 + text_w + 14
+        max_w = max(60.0, rect.width() - 2 * margin)
+        chip_w = min(chip_w, max_w)
         chip = QRectF(rect.left() + margin, rect.top() + margin, chip_w, chip_h)
 
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 140))
-        painter.drawRoundedRect(chip, 13, 13)
+        painter.setBrush(QColor(0, 0, 0, 200))
+        painter.drawRoundedRect(chip, chip_h / 2, chip_h / 2)
 
         dot_color = QColor(STATUS_COLORS.get(self._status, "#9a9aa0"))
         painter.setBrush(dot_color)
-        painter.drawEllipse(QPointF(chip.left() + 14, chip.center().y()), 4.5, 4.5)
+        dot_cx = chip.left() + 14 + dot_d / 2
+        painter.drawEllipse(QPointF(dot_cx, chip.center().y()), dot_d / 2, dot_d / 2)
 
-        painter.setPen(QColor("#f2f2f7"))
+        painter.setPen(QColor("#ffffff"))
+        text_left = dot_cx + dot_d / 2 + 8
+        text_right = chip.right() - 14
         painter.drawText(
-            QRectF(chip.left() + 24, chip.top(), chip.width() - 28, chip.height()),
+            QRectF(text_left, chip.top(), max(0.0, text_right - text_left), chip.height()),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
             name,
         )
 
         # Top-right: zoom indicator if zoomed.
         if self._zoom > 1.01:
-            zoom_text = f"{self._zoom:.1f}x"
-            tw = painter.fontMetrics().horizontalAdvance(zoom_text) + 18
+            zoom_text = f"{self._zoom:.1f}×"
+            tw = painter.fontMetrics().horizontalAdvance(zoom_text) + 20
             zchip = QRectF(rect.right() - margin - tw, rect.top() + margin, tw, chip_h)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 140))
-            painter.drawRoundedRect(zchip, 13, 13)
-            painter.setPen(QColor("#f2f2f7"))
+            painter.setBrush(QColor(0, 0, 0, 200))
+            painter.drawRoundedRect(zchip, chip_h / 2, chip_h / 2)
+            painter.setPen(QColor("#ffffff"))
             painter.drawText(zchip, Qt.AlignmentFlag.AlignCenter, zoom_text)
 
     # -- input --

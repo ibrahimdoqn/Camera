@@ -24,7 +24,10 @@ from .resource_monitor import ResourceMonitor
 
 
 SIDEBAR_WIDTH = 280
-SIDEBAR_COLLAPSED_WIDTH = 48
+# Wide enough that the 40 px toggle button fills the content area exactly,
+# leaving the button visually centred when the sidebar is collapsed.
+SIDEBAR_COLLAPSED_WIDTH = 56
+TOGGLE_BUTTON_SIZE = 40
 
 
 class MainWindow(QMainWindow):
@@ -47,7 +50,7 @@ class MainWindow(QMainWindow):
         # Header row: title + toggle button.
         self.toggle_btn = QPushButton()
         self.toggle_btn.setObjectName("ToggleButton")
-        self.toggle_btn.setFixedSize(36, 36)
+        self.toggle_btn.setFixedSize(TOGGLE_BUTTON_SIZE, TOGGLE_BUTTON_SIZE)
         self.toggle_btn.setToolTip("Kenar çubuğunu daralt/genişlet")
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self._toggle_sidebar)
@@ -57,9 +60,9 @@ class MainWindow(QMainWindow):
 
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(8)
-        header_row.addWidget(self.toggle_btn)
-        header_row.addWidget(self.title_label, 1)
+        header_row.setSpacing(10)
+        header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        header_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
         # Body widgets (hidden when collapsed).
         self.cameras_label = QLabel("Kameralar")
