@@ -169,6 +169,10 @@ class CameraGrid(QWidget):
         for tile in self._tiles.values():
             tile.stop()
 
+    def stop_all_and_wait(self) -> None:
+        for tile in self._tiles.values():
+            tile.stop_and_wait()
+
     def is_maximized(self) -> bool:
         return self._maximized_id is not None
 

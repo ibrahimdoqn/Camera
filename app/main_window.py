@@ -314,7 +314,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.ptz_panel.shutdown()
-        self.grid.stop_all()
+        self.grid.stop_all_and_wait()
         self._resource_monitor.shutdown()
         self._save()
         super().closeEvent(event)

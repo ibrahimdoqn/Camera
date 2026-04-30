@@ -101,18 +101,21 @@ QPushButton#IconButton:hover {{
 }}
 
 QPushButton#ToggleButton {{
-    background-color: {COLORS['bg_hover']};
+    background-color: {COLORS['bg']};
     border: 1px solid {COLORS['border']};
-    border-radius: 8px;
+    border-radius: 10px;
     color: {COLORS['text']};
-    font-size: 22px;
+    font-size: 24px;
     font-weight: 900;
-    padding: 0 0 4px 0;
+    padding: 0 0 3px 0;
 }}
 QPushButton#ToggleButton:hover {{
     background-color: {COLORS['accent']};
     border: 1px solid {COLORS['accent']};
     color: white;
+}}
+QPushButton#ToggleButton:pressed {{
+    background-color: {COLORS['accent_hover']};
 }}
 
 QPushButton#MuteButton {{
@@ -166,17 +169,64 @@ QListWidget {{
 }}
 QListWidget::item {{
     background-color: transparent;
-    border-radius: 8px;
-    padding: 10px 12px;
-    margin: 2px 0;
     color: {COLORS['text']};
+    border: none;
+    padding: 0;
+    margin: 0;
 }}
-QListWidget::item:hover {{
+QListWidget::item:hover,
+QListWidget::item:selected {{
+    background-color: transparent;
+}}
+
+/* Selection / hover are painted by CameraRow itself. */
+QListWidget#CameraList {{
+    padding: 4px 6px;
+}}
+
+QWidget#CameraRow {{
+    background-color: transparent;
+    border-radius: 10px;
+}}
+QWidget#CameraRow:hover {{
     background-color: {COLORS['bg_hover']};
 }}
-QListWidget::item:selected {{
+QWidget#CameraRow[selected="true"] {{
     background-color: {COLORS['accent']};
+}}
+QWidget#CameraRow[selected="true"]:hover {{
+    background-color: {COLORS['accent_hover']};
+}}
+
+QLabel#CameraDot {{
+    background-color: {COLORS['success']};
+    border-radius: 4px;
+    min-width: 8px;
+    max-width: 8px;
+    min-height: 8px;
+    max-height: 8px;
+}}
+QWidget#CameraRow[selected="true"] QLabel#CameraDot {{
+    background-color: white;
+}}
+
+QLabel#CameraRowName {{
+    color: {COLORS['text']};
+    font-size: 14px;
+    font-weight: 600;
+    background: transparent;
+}}
+QWidget#CameraRow[selected="true"] QLabel#CameraRowName {{
     color: white;
+}}
+
+QLabel#CameraRowSub {{
+    color: {COLORS['text_muted']};
+    font-size: 11px;
+    background: transparent;
+}}
+QWidget#CameraRow[selected="true"] QLabel#CameraRowSub {{
+    color: rgba(255, 255, 255, 0.78);
 }}
 
 QLineEdit, QSpinBox, QComboBox {{
@@ -257,16 +307,6 @@ QLabel#PtzCameraName {{
     font-size: 13px;
     font-weight: 600;
     padding: 0 4px;
-}}
-
-QLabel#CameraRowName {{
-    color: {COLORS['text']};
-    font-size: 13px;
-    background: transparent;
-}}
-
-QListWidget::item:selected QLabel#CameraRowName {{
-    color: white;
 }}
 
 QToolTip {{

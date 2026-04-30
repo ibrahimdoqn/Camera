@@ -32,6 +32,10 @@ STATUS_COLORS = {
     "idle":       "#9a9aa0",
 }
 
+# Pixels of cursor travel before a press becomes a drag. Below this, the
+# gesture is treated as a click — the image must not pan during the click.
+DRAG_THRESHOLD = 6
+
 
 class CameraTile(QWidget):
     """Renders one camera. Click selects, double-click toggles maximize."""
@@ -65,10 +69,9 @@ class CameraTile(QWidget):
 
         self.setMinimumSize(QSize(240, 140))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self._dragging = False
-        self._drag_origin = QPointF(0.0, 0.0)
+        self._press_pos = QPointF(0.0, 0.0)
         self._pan_origin = QPointF(0.0, 0.0)
 
     # -- public API --
@@ -106,6 +109,19 @@ class CameraTile(QWidget):
         self._stop_audio()
         self._status = "idle"
         self.update()
+
+    def stop_and_wait(self, timeout_ms: int = 1500) -> None:
+        """Block briefly so the worker thread can exit cleanly. Use on close."""
+        thread = self._thread
+        if self._worker is not None:
+            self._worker.stop()
+        self._worker = None
+        self._thread = None
+        self._stop_audio()
+        self._status = "idle"
+        if thread is not None:
+            thread.quit()
+            thread.wait(timeout_ms)
 
     def reset_zoom(self) -> None:
         self._zoom = 1.0
@@ -337,19 +353,8 @@ class CameraTile(QWidget):
         if abs(new_zoom - self._zoom) < 1e-3:
             return
 
-        scale_change = new_zoom / self._zoom
-
-        if delta > 0:
-            # Zoom in: anchor on cursor so the point under the cursor stays put.
-            rect = QRectF(self.rect())
-            center = rect.center()
-            cursor = QPointF(event.position())
-            offset = (cursor - center) - self._pan
-            self._pan = (cursor - center) - offset * scale_change
-        else:
-            # Zoom out: scale pan toward 0 so the image re-centers smoothly.
-            self._pan = QPointF(self._pan.x() * scale_change, self._pan.y() * scale_change)
-
+        # Zoom around the widget centre and leave pan alone — only an explicit
+        # drag should ever move the picture, never the zoom step itself.
         self._zoom = new_zoom
         if self._zoom <= 1.0001:
             self._zoom = 1.0
@@ -359,26 +364,35 @@ class CameraTile(QWidget):
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = True
-            self._drag_origin = QPointF(event.position())
+            # Don't enter drag mode yet — wait until the cursor actually moves.
+            self._press_pos = QPointF(event.position())
             self._pan_origin = QPointF(self._pan)
+            self._dragging = False
         elif event.button() == Qt.MouseButton.RightButton:
             self.reset_zoom()
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        if self._dragging and self._zoom > 1.0:
-            delta = QPointF(event.position()) - self._drag_origin
-            self._pan = QPointF(self._pan_origin.x() + delta.x(), self._pan_origin.y() + delta.y())
-            self.update()
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._zoom <= 1.0:
+            return
+        delta = QPointF(event.position()) - self._press_pos
+        if not self._dragging:
+            if delta.manhattanLength() <= DRAG_THRESHOLD:
+                return
+            self._dragging = True
+        self._pan = QPointF(self._pan_origin.x() + delta.x(),
+                            self._pan_origin.y() + delta.y())
+        self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:  # noqa: N802
-        moved = (QPointF(event.position()) - self._drag_origin).manhattanLength() > 4
-        was_dragging = self._dragging
-        self._dragging = False
-        if event.button() == Qt.MouseButton.LeftButton and was_dragging and not moved:
-            # Single click: select only (does NOT toggle maximize).
-            self.clicked.emit(self.camera.id)
+        if event.button() == Qt.MouseButton.LeftButton:
+            was_dragging = self._dragging
+            self._dragging = False
+            if not was_dragging:
+                # Treat as a click: just select; don't maximize.
+                self.clicked.emit(self.camera.id)
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:  # noqa: N802
