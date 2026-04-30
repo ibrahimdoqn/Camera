@@ -3,6 +3,11 @@
 All ONVIF/SOAP calls are blocking, so they live in a worker on its own
 QThread. The controller exposes Qt signals for capabilities/presets/errors
 and slots (via signals) for movement/stop/preset commands.
+
+Controllers are typically created once per camera at app startup (see
+:class:`PtzManager`) so the PTZ panel can be displayed instantly when a
+camera is selected — capability/preset discovery has already happened in
+the background by then.
 """
 from __future__ import annotations
 
@@ -140,12 +145,23 @@ class PtzController(QObject):
     def __init__(self, host: str, port: int, username: str, password: str,
                  parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
+        self._host = host
+        self._port = port
+        self._username = username
+        self._password = password
         self._thread = QThread()
         self._worker = _PtzWorker(host, port, username, password)
         self._worker.moveToThread(self._thread)
 
-        self._worker.capabilities_ready.connect(self.capabilities_ready)
-        self._worker.presets_ready.connect(self.presets_ready)
+        # Cache last-known capabilities/presets so a new subscriber gets the
+        # current state immediately on connect, even if discovery already
+        # finished in the background.
+        self._cap_supported: Optional[bool] = None
+        self._cap_message: str = ""
+        self._presets_cache: list = []
+
+        self._worker.capabilities_ready.connect(self._on_caps)
+        self._worker.presets_ready.connect(self._on_presets)
         self._worker.error.connect(self.error)
 
         self._request_init.connect(self._worker.initialize)
@@ -155,8 +171,28 @@ class PtzController(QObject):
 
         self._thread.start()
 
+    @property
+    def credentials(self) -> tuple[str, int, str, str]:
+        return (self._host, self._port, self._username, self._password)
+
     def initialize(self) -> None:
         self._request_init.emit()
+
+    def emit_cached_state(self) -> None:
+        """Re-emit the last known capabilities/presets for new listeners."""
+        if self._cap_supported is not None:
+            self.capabilities_ready.emit(self._cap_supported, self._cap_message)
+        if self._presets_cache:
+            self.presets_ready.emit(list(self._presets_cache))
+
+    def _on_caps(self, supported: bool, message: str) -> None:
+        self._cap_supported = supported
+        self._cap_message = message
+        self.capabilities_ready.emit(supported, message)
+
+    def _on_presets(self, presets: list) -> None:
+        self._presets_cache = list(presets)
+        self.presets_ready.emit(list(presets))
 
     def move(self, pan: float, tilt: float, zoom: float = 0.0) -> None:
         self._request_move.emit(pan, tilt, zoom)
@@ -174,3 +210,70 @@ class PtzController(QObject):
             pass
         self._thread.quit()
         self._thread.wait(2000)
+
+
+class PtzManager(QObject):
+    """Owns one :class:`PtzController` per camera id and starts ONVIF
+    discovery for every camera up-front, so the PTZ panel never has to
+    wait for a SOAP handshake when a camera is selected.
+    """
+
+    def __init__(self, parent: Optional[QObject] = None) -> None:
+        super().__init__(parent)
+        self._controllers: dict[str, PtzController] = {}
+
+    def ensure(self, camera) -> Optional[PtzController]:
+        """Return (creating if necessary) the controller for ``camera``.
+
+        If credentials changed since last call, the old controller is
+        torn down and a fresh one is created.
+        """
+        if not camera or not camera.host:
+            return None
+        existing = self._controllers.get(camera.id)
+        if existing is not None:
+            host, port, user, pw = existing.credentials
+            if (host == camera.host and port == camera.onvif_port
+                    and user == camera.username and pw == camera.password):
+                return existing
+            # Credentials changed — tear down and rebuild.
+            existing.shutdown()
+            existing.deleteLater()
+            del self._controllers[camera.id]
+        ctrl = PtzController(
+            host=camera.host,
+            port=camera.onvif_port,
+            username=camera.username,
+            password=camera.password,
+            parent=self,
+        )
+        self._controllers[camera.id] = ctrl
+        ctrl.initialize()
+        return ctrl
+
+    def get(self, camera_id: str) -> Optional[PtzController]:
+        return self._controllers.get(camera_id)
+
+    def remove(self, camera_id: str) -> None:
+        ctrl = self._controllers.pop(camera_id, None)
+        if ctrl is not None:
+            ctrl.shutdown()
+            ctrl.deleteLater()
+
+    def sync(self, cameras: list) -> None:
+        """Spin up controllers for new cameras, drop ones that vanished."""
+        wanted_ids = {c.id for c in cameras}
+        for cam_id in list(self._controllers.keys()):
+            if cam_id not in wanted_ids:
+                self.remove(cam_id)
+        for cam in cameras:
+            self.ensure(cam)
+
+    def shutdown(self) -> None:
+        for ctrl in self._controllers.values():
+            try:
+                ctrl.shutdown()
+            except Exception:
+                pass
+            ctrl.deleteLater()
+        self._controllers.clear()

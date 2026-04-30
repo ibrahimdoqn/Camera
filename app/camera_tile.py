@@ -42,6 +42,8 @@ class CameraTile(QWidget):
 
     clicked = pyqtSignal(str)         # single click → select
     double_clicked = pyqtSignal(str)  # double click → toggle maximize
+    first_frame = pyqtSignal(str)     # camera_id, fired once when first
+                                      # frame arrives (used by the splash)
 
     def __init__(self, camera: Camera, target_fps: int = 20, reconnect_delay: float = 3.0,
                  show_overlay: bool = True, parent: Optional[QWidget] = None) -> None:
@@ -55,6 +57,7 @@ class CameraTile(QWidget):
         self._pixmap: Optional[QPixmap] = None
         self._status: str = "idle"
         self._last_error: str = ""
+        self._emitted_first_frame: bool = False
 
         # Zoom/pan state. zoom = 1.0 fits the widget.
         self._zoom: float = 1.0
@@ -64,8 +67,11 @@ class CameraTile(QWidget):
         self._thread: Optional[QThread] = None
 
         # Audio playback (lazy-init, only when enabled).
+        # Backend can be either libVLC (preferred — actually supports RTSP
+        # audio) or Qt's QMediaPlayer (fallback).
         self._audio_player = None
         self._audio_output = None
+        self._audio_backend: Optional[str] = None
 
         self.setMinimumSize(QSize(240, 140))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -164,8 +170,51 @@ class CameraTile(QWidget):
             self._stop_audio()
 
     def _start_audio(self) -> None:
+        """Play RTSP audio.
+
+        Qt's :class:`QMediaPlayer` (Windows Media Foundation backend) does
+        not support RTSP, so the actual audio you hear in tools like
+        StreamShow / VLC is delivered by libVLC. We mirror that: if
+        ``python-vlc`` is installed, use it as the audio backend; only fall
+        back to ``QMediaPlayer`` when VLC is not available (it usually fails
+        for RTSP, but we keep the fallback so nothing crashes).
+        """
         if self._audio_player is not None:
             return
+
+        # 1) Preferred path: libVLC.
+        try:
+            import vlc  # type: ignore
+        except ImportError:
+            vlc = None  # type: ignore
+
+        if vlc is not None:
+            try:
+                # No video — we render the picture ourselves via OpenCV; VLC
+                # is here strictly for the audio track. ``--network-caching``
+                # mirrors typical low-latency RTSP defaults.
+                instance = vlc.Instance(
+                    "--no-video",
+                    "--network-caching=300",
+                    "--rtsp-tcp",
+                    "--quiet",
+                )
+                player = instance.media_player_new()
+                media = instance.media_new(self.camera.rtsp_url)
+                player.set_media(media)
+                player.audio_set_volume(100)
+                player.play()
+                # Keep a reference to the instance so it isn't GC'd before
+                # the player.
+                self._audio_player = player
+                self._audio_output = instance
+                self._audio_backend = "vlc"
+                return
+            except Exception:
+                self._audio_player = None
+                self._audio_output = None
+
+        # 2) Fallback: QMediaPlayer (rarely works with RTSP but harmless).
         try:
             from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
         except ImportError:
@@ -179,24 +228,33 @@ class CameraTile(QWidget):
             player.play()
             self._audio_player = player
             self._audio_output = output
+            self._audio_backend = "qt"
         except Exception:
             self._audio_player = None
             self._audio_output = None
+            self._audio_backend = None
 
     def _stop_audio(self) -> None:
+        backend = getattr(self, "_audio_backend", None)
         if self._audio_player is not None:
             try:
-                self._audio_player.stop()
-                self._audio_player.deleteLater()
+                if backend == "vlc":
+                    self._audio_player.stop()
+                    # vlc objects don't have deleteLater(); just drop refs.
+                else:
+                    self._audio_player.stop()
+                    self._audio_player.deleteLater()
             except Exception:
                 pass
             self._audio_player = None
         if self._audio_output is not None:
             try:
-                self._audio_output.deleteLater()
+                if backend != "vlc":
+                    self._audio_output.deleteLater()
             except Exception:
                 pass
             self._audio_output = None
+        self._audio_backend = None
 
     # -- worker callbacks --
 
@@ -206,6 +264,9 @@ class CameraTile(QWidget):
         h, w, _ = rgb.shape
         image = QImage(rgb.data, w, h, w * 3, QImage.Format.Format_RGB888).copy()
         self._pixmap = QPixmap.fromImage(image)
+        if not self._emitted_first_frame:
+            self._emitted_first_frame = True
+            self.first_frame.emit(self.camera.id)
         self.update()
 
     def _on_status(self, status: str) -> None:
@@ -313,7 +374,7 @@ class CameraTile(QWidget):
     def _draw_overlay(self, painter: QPainter, rect: QRectF) -> None:
         # Top-left: camera name with status dot. Pull the chip in past the
         # rounded corner radius so it never sits on the curve.
-        margin = 16
+        margin = 18
         font = QFont(painter.font())
         font.setPointSize(11)
         font.setWeight(QFont.Weight.DemiBold)
@@ -321,16 +382,18 @@ class CameraTile(QWidget):
 
         name = self.camera.name or self.camera.host or "Kamera"
         text_w = painter.fontMetrics().horizontalAdvance(name)
-        chip_h = 30
-        dot_d = 8
+        chip_h = 32
+        dot_d = 10
         # left padding | dot | gap | text | right padding
         chip_w = 14 + dot_d + 8 + text_w + 14
         max_w = max(60.0, rect.width() - 2 * margin)
         chip_w = min(chip_w, max_w)
         chip = QRectF(rect.left() + margin, rect.top() + margin, chip_w, chip_h)
 
+        # Solid, near-opaque pill so the white text stays legible regardless of
+        # the underlying frame and the selection (blue) border.
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 200))
+        painter.setBrush(QColor(0, 0, 0, 235))
         painter.drawRoundedRect(chip, chip_h / 2, chip_h / 2)
 
         dot_color = QColor(STATUS_COLORS.get(self._status, "#9a9aa0"))
@@ -353,7 +416,7 @@ class CameraTile(QWidget):
             tw = painter.fontMetrics().horizontalAdvance(zoom_text) + 20
             zchip = QRectF(rect.right() - margin - tw, rect.top() + margin, tw, chip_h)
             painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 200))
+            painter.setBrush(QColor(0, 0, 0, 235))
             painter.drawRoundedRect(zchip, chip_h / 2, chip_h / 2)
             painter.setPen(QColor("#ffffff"))
             painter.drawText(zchip, Qt.AlignmentFlag.AlignCenter, zoom_text)
@@ -371,12 +434,21 @@ class CameraTile(QWidget):
         if abs(new_zoom - self._zoom) < 1e-3:
             return
 
-        # Zoom around the widget centre and leave pan alone — only an explicit
-        # drag should ever move the picture, never the zoom step itself.
+        # Zoom around the cursor: keep the image point currently under the
+        # cursor pinned to the same screen position after the zoom change.
+        rect_center = QPointF(self.rect().center())
+        cursor = QPointF(event.position())
+        f = new_zoom / self._zoom
+        # new_pan = (1 - f) * (cursor - rect_center) + f * old_pan
+        new_pan_x = (1.0 - f) * (cursor.x() - rect_center.x()) + f * self._pan.x()
+        new_pan_y = (1.0 - f) * (cursor.y() - rect_center.y()) + f * self._pan.y()
+
         self._zoom = new_zoom
         if self._zoom <= 1.0001:
             self._zoom = 1.0
             self._pan = QPointF(0.0, 0.0)
+        else:
+            self._pan = QPointF(new_pan_x, new_pan_y)
         self.update()
         event.accept()
 

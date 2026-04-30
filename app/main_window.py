@@ -19,6 +19,7 @@ from .camera_grid import CameraGrid
 from .camera_list import CameraList
 from .config import AppConfig, Camera, load_config, save_config
 from .dialogs import CameraDialog, SettingsDialog
+from .onvif_ptz import PtzManager
 from .ptz_panel import PtzPanel
 from .resource_monitor import ResourceMonitor
 
@@ -31,14 +32,16 @@ TOGGLE_BUTTON_SIZE = 40
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, preloaded_config: AppConfig | None = None,
+                 splash=None) -> None:
         super().__init__()
         self.setWindowTitle("Tapo Viewer")
         self.resize(1280, 800)
         self.setMinimumSize(QSize(720, 600))
 
-        self._config: AppConfig = load_config()
+        self._config: AppConfig = preloaded_config or load_config()
         self._collapsed: bool = bool(self._config.settings.sidebar_collapsed)
+        self._splash = splash
 
         # ---- Sidebar shell ----
         self.sidebar = QWidget()
@@ -58,11 +61,12 @@ class MainWindow(QMainWindow):
         self.title_label = QLabel("Tapo Viewer")
         self.title_label.setObjectName("TitleLabel")
 
-        header_row = QHBoxLayout()
-        header_row.setContentsMargins(0, 0, 0, 0)
-        header_row.setSpacing(10)
-        header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-        header_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        # Header row layout is rebuilt on collapse/expand so the toggle
+        # button sits flush-left with the title (expanded) or perfectly
+        # centred on its own (collapsed).
+        self._header_row = QHBoxLayout()
+        self._header_row.setContentsMargins(0, 0, 0, 0)
+        self._header_row.setSpacing(10)
 
         # Body widgets (hidden when collapsed).
         self.cameras_label = QLabel("Kameralar")
@@ -86,14 +90,18 @@ class MainWindow(QMainWindow):
         self.settings_btn = QPushButton("Ayarlar")
         self.settings_btn.clicked.connect(self._on_open_settings)
 
+        # PTZ manager spins up an ONVIF controller per camera ahead of time
+        # so opening the panel feels instant.
+        self.ptz_manager = PtzManager(self)
+
         # PTZ panel.
-        self.ptz_panel = PtzPanel()
+        self.ptz_panel = PtzPanel(manager=self.ptz_manager)
 
         # Layout.
         sidebar_layout = QVBoxLayout(self.sidebar)
         sidebar_layout.setContentsMargins(8, 12, 8, 12)
         sidebar_layout.setSpacing(8)
-        sidebar_layout.addLayout(header_row)
+        sidebar_layout.addLayout(self._header_row)
 
         # Wrap the body so we can hide/show it as a single unit.
         self.body_widget = QWidget()
@@ -115,6 +123,8 @@ class MainWindow(QMainWindow):
         self.grid = CameraGrid(settings=self._config.settings)
         self.grid.selection_changed.connect(self._on_grid_selection_changed)
         self.grid.tile_selected.connect(self._on_tile_selected)
+        if self._splash is not None:
+            self.grid.tile_first_frame.connect(self._splash.mark_camera_ready)
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -139,6 +149,9 @@ class MainWindow(QMainWindow):
 
         self._refresh_camera_list()
         self.grid.set_cameras(self._config.cameras)
+        # Kick off ONVIF discovery for every camera right away so PTZ is
+        # ready before the user clicks anything.
+        self.ptz_manager.sync(self._config.cameras)
         self._apply_collapsed_state()
         self._update_status()
         self.ptz_panel.set_camera(None)
@@ -180,6 +193,18 @@ class MainWindow(QMainWindow):
         self.toggle_btn.setToolTip(
             "Kenar çubuğunu genişlet" if self._collapsed else "Kenar çubuğunu daralt"
         )
+        # Rebuild the header row so the toggle button is perfectly centred
+        # when collapsed (stretches on both sides) and flush-left next to the
+        # title when expanded.
+        while self._header_row.count():
+            self._header_row.takeAt(0)
+        if self._collapsed:
+            self._header_row.addStretch(1)
+            self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._header_row.addStretch(1)
+        else:
+            self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+            self._header_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
     def _toggle_sidebar(self) -> None:
         self._collapsed = not self._collapsed
@@ -224,6 +249,7 @@ class MainWindow(QMainWindow):
         self._config.cameras = new_order
         self._save()
         self.grid.set_cameras(self._config.cameras)
+        self.ptz_manager.sync(self._config.cameras)
         self._update_status()
 
     def _on_mute_toggled(self, camera_id: str, audio_enabled: bool) -> None:
@@ -254,6 +280,7 @@ class MainWindow(QMainWindow):
             self._save()
             self._refresh_camera_list(selected_id=cam.id)
             self.grid.set_cameras(self._config.cameras)
+            self.ptz_manager.sync(self._config.cameras)
             self._update_status()
 
     def _on_edit_camera(self) -> None:
@@ -270,6 +297,7 @@ class MainWindow(QMainWindow):
             self._save()
             self._refresh_camera_list(selected_id=updated.id)
             self.grid.set_cameras(self._config.cameras)
+            self.ptz_manager.sync(self._config.cameras)
             self.ptz_panel.set_camera(self._camera_by_id(updated.id))
 
     def _on_remove_camera(self) -> None:
@@ -288,6 +316,8 @@ class MainWindow(QMainWindow):
         self._save()
         self._refresh_camera_list()
         self.grid.set_cameras(self._config.cameras)
+        self.ptz_manager.remove(cam.id)
+        self.ptz_manager.sync(self._config.cameras)
         self.ptz_panel.set_camera(self._selected_camera())
         self._update_status()
 
@@ -317,6 +347,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.ptz_panel.shutdown()
+        self.ptz_manager.shutdown()
         self.grid.stop_all_and_wait()
         self._resource_monitor.shutdown()
         self._save()

@@ -3,9 +3,19 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, pyqtSignal
+from PyQt6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPropertyAnimation,
+    QSize,
+    QTimer,
+    Qt,
+    pyqtSignal,
+)
+from PyQt6.QtGui import QDrag
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -44,7 +54,7 @@ class CameraRow(QWidget):
 
         self._dot = QLabel()
         self._dot.setObjectName("CameraDot")
-        self._dot.setFixedSize(8, 8)
+        self._dot.setFixedSize(14, 14)
         self._dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self._name = QLabel()
@@ -131,12 +141,14 @@ class CameraList(QListWidget):
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.setUniformItemSizes(True)
-        self.setSpacing(2)
+        self.setSpacing(4)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.model().rowsMoved.connect(self._emit_order)
+        self.model().rowsMoved.connect(self._on_rows_moved)
         self.itemSelectionChanged.connect(self._on_selection_changed)
         self.itemDoubleClicked.connect(self._emit_double_click)
+        # Track post-drop animation refs so they aren't GC'd mid-flight.
+        self._row_anims: list[QPropertyAnimation] = []
 
     def populate(self, cameras: list[Camera], selected_id: Optional[str] = None) -> None:
         self.blockSignals(True)
@@ -185,8 +197,57 @@ class CameraList(QListWidget):
             for i in range(self.count())
         ]
 
-    def _emit_order(self, *_args) -> None:
+    def _on_rows_moved(self, *_args) -> None:
+        """Fire ``order_changed`` and play a soft settle animation so the
+        moved row lands smoothly rather than snapping into place."""
         self.order_changed.emit(self._ordered_ids())
+        # Defer to the next event loop tick so the list view has finished
+        # repositioning the widget before we animate it.
+        QTimer.singleShot(0, self._animate_settle)
+
+    def _animate_settle(self) -> None:
+        # Drop stale animations.
+        self._row_anims = [a for a in self._row_anims
+                           if a.state() == QPropertyAnimation.State.Running]
+        for i in range(self.count()):
+            item = self.item(i)
+            widget = self.itemWidget(item)
+            if widget is None:
+                continue
+            effect = widget.graphicsEffect()
+            if not isinstance(effect, QGraphicsOpacityEffect):
+                effect = QGraphicsOpacityEffect(widget)
+                widget.setGraphicsEffect(effect)
+            anim = QPropertyAnimation(effect, b"opacity", widget)
+            anim.setDuration(220)
+            anim.setStartValue(0.55)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+            self._row_anims.append(anim)
+
+    def startDrag(self, supportedActions) -> None:  # noqa: N802
+        """Use the full row widget as the drag pixmap so the camera
+        visibly travels with the cursor (Apple-style)."""
+        item = self.currentItem()
+        if item is None:
+            return super().startDrag(supportedActions)
+        widget = self.itemWidget(item)
+        if widget is None:
+            return super().startDrag(supportedActions)
+        try:
+            indexes = [self.indexFromItem(item)]
+            mime = self.model().mimeData(indexes)
+        except Exception:
+            return super().startDrag(supportedActions)
+        if mime is None:
+            return super().startDrag(supportedActions)
+        pixmap = widget.grab()
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        drag.setPixmap(pixmap)
+        drag.setHotSpot(QPoint(pixmap.width() // 2, pixmap.height() // 2))
+        drag.exec(supportedActions, Qt.DropAction.MoveAction)
 
     def _on_selection_changed(self) -> None:
         self._refresh_selection_state()

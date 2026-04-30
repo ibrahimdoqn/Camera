@@ -132,6 +132,19 @@ QPushButton#MuteButton:checked {{
     color: {COLORS['accent']};
 }}
 
+/* Inside a selected (blue) row, the mute toggle & dot must remain visible. */
+QWidget#CameraRow[selected="true"] QPushButton#MuteButton {{
+    color: white;
+    background-color: rgba(255, 255, 255, 0.18);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#MuteButton:hover {{
+    background-color: rgba(255, 255, 255, 0.30);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#MuteButton:checked {{
+    color: white;
+    background-color: rgba(255, 255, 255, 0.28);
+}}
+
 QPushButton#PtzButton {{
     background-color: {COLORS['bg']};
     border: 1px solid {COLORS['border']};
@@ -200,14 +213,16 @@ QWidget#CameraRow[selected="true"]:hover {{
 
 QLabel#CameraDot {{
     background-color: {COLORS['success']};
-    border-radius: 4px;
-    min-width: 8px;
-    max-width: 8px;
-    min-height: 8px;
-    max-height: 8px;
+    border-radius: 5px;
+    min-width: 10px;
+    max-width: 10px;
+    min-height: 10px;
+    max-height: 10px;
 }}
+/* Keep the green dot visible inside the selected (blue) row by giving it a
+   subtle white halo, but don't strip its status colour. */
 QWidget#CameraRow[selected="true"] QLabel#CameraDot {{
-    background-color: white;
+    border: 2px solid white;
 }}
 
 QLabel#CameraRowName {{
@@ -226,7 +241,7 @@ QLabel#CameraRowSub {{
     background: transparent;
 }}
 QWidget#CameraRow[selected="true"] QLabel#CameraRowSub {{
-    color: rgba(255, 255, 255, 0.78);
+    color: rgba(255, 255, 255, 0.95);
 }}
 
 QLineEdit, QSpinBox, QComboBox {{
@@ -299,7 +314,6 @@ QStatusBar {{
 QLabel#ResourceLabel {{
     color: {COLORS['text_muted']};
     font-size: 12px;
-    font-variant-numeric: tabular-nums;
 }}
 
 QLabel#PtzCameraName {{

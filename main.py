@@ -13,7 +13,9 @@ os.environ.setdefault(
 from PyQt6.QtGui import QFont, QFontDatabase
 from PyQt6.QtWidgets import QApplication
 
+from app.config import load_config
 from app.main_window import MainWindow
+from app.splash import SplashScreen
 from app.styles import APP_STYLESHEET
 
 
@@ -34,8 +36,16 @@ def main() -> int:
 
     app.setStyleSheet(APP_STYLESHEET)
 
-    window = MainWindow()
-    window.show()
+    # Animated splash screen: show first, build the main window behind it,
+    # and only reveal the main window after every camera has produced its
+    # first frame (or a short timeout elapses).
+    cfg = load_config()
+    splash = SplashScreen(total_cameras=len(cfg.cameras))
+    splash.start()
+    app.processEvents()
+
+    window = MainWindow(preloaded_config=cfg, splash=splash)
+    splash.finished.connect(window.show)
     return app.exec()
 
 

@@ -3,3 +3,8 @@ opencv-python>=4.9.0
 numpy>=1.26.0
 onvif-zeep>=0.2.12
 psutil>=5.9.0
+# python-vlc enables RTSP audio playback. Qt's QMediaPlayer cannot decode
+# RTSP audio on Windows, so we delegate audio to libVLC. Requires VLC to
+# also be installed system-wide (https://www.videolan.org/vlc/) so that
+# libvlc.dll is on PATH.
+python-vlc>=3.0.0

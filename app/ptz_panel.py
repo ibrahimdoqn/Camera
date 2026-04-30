@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import Camera
-from .onvif_ptz import PtzController, PtzPreset
+from .onvif_ptz import PtzController, PtzManager, PtzPreset
 
 
 PAN_SPEED = 0.5
@@ -49,16 +49,22 @@ class HoldButton(QPushButton):
 class PtzPanel(QWidget):
     """PTZ control panel bound to a single camera. Hidden when unbound."""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, manager: Optional[PtzManager] = None,
+                 parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._manager: Optional[PtzManager] = manager
         self._camera: Optional[Camera] = None
         self._controller: Optional[PtzController] = None
+        self._owns_controller: bool = False  # only True if no manager available
         self._supported: bool = False
         self._presets: list[PtzPreset] = []
 
         self._build_ui()
         self._update_enabled_state()
         self.setVisible(False)
+
+    def set_manager(self, manager: PtzManager) -> None:
+        self._manager = manager
 
     # -------------------- UI --------------------
 
@@ -161,17 +167,11 @@ class PtzPanel(QWidget):
         if camera is None and self._camera is None:
             self.setVisible(False)
             return
-        if camera is not None and self._camera is not None and camera.id == self._camera.id:
-            # Only refresh credentials if they changed.
-            if (camera.host == self._camera.host
-                    and camera.onvif_port == self._camera.onvif_port
-                    and camera.username == self._camera.username
-                    and camera.password == self._camera.password):
-                self._camera = camera
-                self._name_label.setText(camera.name or camera.host)
-                return
 
-        self._teardown_controller()
+        # Detach from any previous controller without tearing it down — the
+        # manager owns its lifetime and discovery results stay cached for
+        # the next time this camera is selected.
+        self._unbind_controller()
         self._camera = camera
         self._supported = False
         self._presets = []
@@ -192,33 +192,63 @@ class PtzPanel(QWidget):
             self._update_enabled_state()
             return
 
+        # Get-or-create controller. With the manager pre-initialised at
+        # startup this returns instantly with cached capabilities/presets.
+        if self._manager is not None:
+            self._controller = self._manager.ensure(camera)
+            self._owns_controller = False
+        else:
+            self._controller = PtzController(
+                host=camera.host,
+                port=camera.onvif_port,
+                username=camera.username,
+                password=camera.password,
+                parent=self,
+            )
+            self._owns_controller = True
+            self._controller.initialize()
+
+        if self._controller is None:
+            self._status.setText("ONVIF kullanılamıyor")
+            self._update_enabled_state()
+            return
+
         self._status.setText("ONVIF bağlanıyor...")
-        self._controller = PtzController(
-            host=camera.host,
-            port=camera.onvif_port,
-            username=camera.username,
-            password=camera.password,
-            parent=self,
-        )
         self._controller.capabilities_ready.connect(self._on_capabilities)
         self._controller.presets_ready.connect(self._on_presets)
         self._controller.error.connect(self._on_error)
-        self._controller.initialize()
+        # Pull cached state immediately (instant if discovery already done).
+        self._controller.emit_cached_state()
         self._update_enabled_state()
 
     def shutdown(self) -> None:
-        self._teardown_controller()
+        self._unbind_controller()
 
     # -------------------- internal --------------------
 
-    def _teardown_controller(self) -> None:
-        if self._controller is not None:
+    def _unbind_controller(self) -> None:
+        if self._controller is None:
+            return
+        try:
+            self._controller.capabilities_ready.disconnect(self._on_capabilities)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._controller.presets_ready.disconnect(self._on_presets)
+        except (TypeError, RuntimeError):
+            pass
+        try:
+            self._controller.error.disconnect(self._on_error)
+        except (TypeError, RuntimeError):
+            pass
+        if self._owns_controller:
             try:
                 self._controller.shutdown()
             except Exception:
                 pass
             self._controller.deleteLater()
-            self._controller = None
+        self._controller = None
+        self._owns_controller = False
 
     def _on_capabilities(self, supported: bool, message: str) -> None:
         self._supported = supported

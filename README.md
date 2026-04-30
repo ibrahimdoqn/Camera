@@ -7,14 +7,18 @@ Sadece izleme odaklıdır. Hareket veya kişi algılama gibi özellikler içerme
 ## Özellikler
 
 - Modern, koyu temalı, Apple tarzı arayüz (PyQt6 + özel QSS)
+- **Animasyonlu açılış (splash) ekranı**: program açılırken havalı bir loading penceresi gösterilir; tüm kameralar ilk kareyi getirdikten sonra ana pencereye geçilir
 - Çoklu kamera için **grid (ızgara) görünümü**, sütun sayısı **Ayarlar** üzerinden 1–8 arası seçilebilir
 - Bir kameraya **tıklayarak seçim**, **çift tıklayınca tam ekran**; tekrar çift tık / `Esc` / "Tüm Izgara" ile geri dönüş
 - **Sol menüden veya kamera kutusuna tıklayarak** kamera seçimi (seçili kamera çerçeveyle vurgulanır)
-- **Sürükle-bırak** ile sol menüde kameraları yeniden sıralama (yerleşim de güncellenir)
+- **Sürükle-bırak** ile sol menüde kameraları yeniden sıralama: tutulan kart imleçle birlikte taşınır, bırakıldığında yumuşak bir oturma (settle) animasyonu oynar
 - **Sağ tık menüsü** ile kamera düzenleme/kaldırma — sol menüde sadece "Kamera Ekle" düğmesi vardır
-- **Ses açma/kapama** her kamera için ayrı düğme; varsayılan olarak tüm sesler kapalıdır
-- **Kamera Hareket** paneli yalnızca bir kamera seçildiğinde görünür; kamera adı net şekilde yazılır ve panel sol menüde ortalıdır
-- **Mouse tekerleği ile zoom**, sürükleyerek pan; sağ tık zoom'u sıfırlar
+- **Ses açma/kapama** her kamera için ayrı düğme; varsayılan olarak tüm sesler kapalıdır. Ses, RTSP'yi gerçekten çözebilen **libVLC** üzerinden çalınır (yedek olarak Qt `QMediaPlayer`)
+- **Kamera Hareket (PTZ)** paneli yalnızca bir kamera seçildiğinde görünür; kamera adı net şekilde yazılır ve panel sol menüde ortalıdır
+- ONVIF PTZ keşfi **uygulama açılışında** her kamera için arka planda yapılır — kameraya tıkladığınızda hareket panelinde **bekleme yoktur**, kontroller anında hazırdır
+- **Mouse tekerleği ile zoom artık imleç merkezlidir**: tekerleği çevirdiğiniz noktanın üzerine yakınlaşır; sürükleyerek pan; sağ tık zoom'u sıfırlar
+- Seçili olan kameranın sol menü kartında **isim, IP ve ses düğmesi yüksek kontrastla** okunaklı görünür; durum noktası seçili durumda da yeşil kalır (etrafında beyaz halka ile)
+- **Daraltılmış sol menüde aç/kapa düğmesi yatayda tam ortalı** olarak gösterilir
 - Kalıcı yapılandırma (`%APPDATA%/TapoViewer/config.json`)
 - **Ayarlar penceresi**: hedef FPS, sütun sayısı, yeniden bağlanma süresi, donanım hızlandırma seçimi, durum rozetini gösterme — değişiklikler **canlı** uygulanır, FPS değişimi artık uygulamayı kilitlemez
 - Otomatik **yeniden bağlanma** ve canlı **bağlantı durumu rozeti** (connecting / online / offline)
@@ -25,6 +29,8 @@ Sadece izleme odaklıdır. Hareket veya kişi algılama gibi özellikler içerme
 ## Kurulum
 
 > Python 3.10+ gerekir. Windows 11'de FFmpeg, `opencv-python` ile birlikte gelir; ayrıca yüklemek gerekmez. GPU yüzdesi `nvidia-smi` varsa otomatik gelir; aksi halde "n/a" gösterilir.
+>
+> **Ses için VLC**: RTSP ses akışını çalmak için sistemde [VLC](https://www.videolan.org/vlc/) kurulu olmalıdır (32/64-bit Python ile aynı mimaride). `python-vlc` paketi `requirements.txt` ile kurulur; ancak `libvlc.dll` sistemde yoksa ses çalmaz (uygulama yine de hatasız çalışmaya devam eder).
 
 ### Önerilen: tek tıkla başlatma (izole `.venv` ile)
 
@@ -99,7 +105,8 @@ Uygulama bu URL'i girdiğiniz alanlardan otomatik üretir; isterseniz "Özel RTS
 ## Mimari
 
 ```
-main.py                     # giriş noktası
+main.py                     # giriş noktası (splash → ana pencere)
+app/splash.py               # animasyonlu açılış (loading) ekranı
 app/main_window.py          # ana pencere + sidebar + sağ tık menüsü
 app/camera_grid.py          # ızgara + tam ekran modu + seçim
 app/camera_tile.py          # tek kamera widget'ı (zoom/pan/ses)
@@ -107,10 +114,12 @@ app/camera_list.py          # sürüklenebilir kamera listesi + ses düğmesi
 app/stream_worker.py        # arka plan RTSP okuyucu (canlı FPS güncellemeli)
 app/dialogs.py              # kamera + ayarlar diyalogları
 app/ptz_panel.py            # ONVIF hareket paneli (seçili kamera için)
-app/onvif_ptz.py            # ONVIF arka plan thread'i
+app/onvif_ptz.py            # ONVIF arka plan thread'i + PtzManager (ön-yükleme)
 app/resource_monitor.py     # CPU / GPU / Ağ göstergesi
 app/config.py               # yapılandırma kalıcılığı
 app/styles.py               # Apple tarzı QSS
 ```
 
-Her kamera kendi `QThread`'inde çalışır. OpenCV `VideoCapture` (FFmpeg backend) frame'leri yakalar, `pyqtSignal` ile UI thread'ine iletir, `QPainter` ile çizilir. Ses gerektiğinde paralel bir `QMediaPlayer` ile çalınır; varsayılan kapalıdır.
+Her kamera kendi `QThread`'inde çalışır. OpenCV `VideoCapture` (FFmpeg backend) frame'leri yakalar, `pyqtSignal` ile UI thread'ine iletir, `QPainter` ile çizilir. Ses gerektiğinde paralel bir **libVLC** oynatıcısıyla çalınır (RTSP'yi destekler); libVLC bulunmazsa Qt `QMediaPlayer` yedek olarak denenir. Varsayılan olarak tüm sesler kapalıdır.
+
+ONVIF (PTZ) bağlantıları açılış sırasında `PtzManager` tarafından her kamera için arka planda kurulur; yetenek/preset bilgileri önbelleğe alınır. Hareket paneli açıldığında bu önbellek kullanıldığı için kamera değiştirirken bekleme yaşanmaz.

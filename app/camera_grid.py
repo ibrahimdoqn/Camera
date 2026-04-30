@@ -97,6 +97,8 @@ class CameraGrid(QWidget):
 
     selection_changed = pyqtSignal(str)  # emits when maximize toggles
     tile_selected = pyqtSignal(str)      # emits on tile single click
+    tile_first_frame = pyqtSignal(str)   # emits once per tile when its first
+                                         # frame is received (for splash)
 
     def __init__(self, settings: Settings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -142,6 +144,7 @@ class CameraGrid(QWidget):
                 )
                 tile.clicked.connect(self._on_tile_clicked)
                 tile.double_clicked.connect(self._on_tile_double_clicked)
+                tile.first_frame.connect(self.tile_first_frame)
                 tile.start()
             else:
                 tile.update_camera(cam)
