@@ -1,28 +1,26 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PyQt6.QtCore import QPoint, QSize, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
-    QSpinBox,
     QStatusBar,
     QVBoxLayout,
     QWidget,
 )
 
 from .camera_grid import CameraGrid
+from .camera_list import CameraList
 from .config import AppConfig, Camera, load_config, save_config
 from .dialogs import CameraDialog, SettingsDialog
 from .ptz_panel import PtzPanel
+from .resource_monitor import ResourceMonitor
 
 
 SIDEBAR_WIDTH = 280
@@ -47,9 +45,9 @@ class MainWindow(QMainWindow):
         )
 
         # Header row: title + toggle button.
-        self.toggle_btn = QPushButton("☰")
-        self.toggle_btn.setObjectName("IconButton")
-        self.toggle_btn.setFixedSize(32, 32)
+        self.toggle_btn = QPushButton()
+        self.toggle_btn.setObjectName("ToggleButton")
+        self.toggle_btn.setFixedSize(36, 36)
         self.toggle_btn.setToolTip("Kenar çubuğunu daralt/genişlet")
         self.toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.toggle_btn.clicked.connect(self._toggle_sidebar)
@@ -67,53 +65,16 @@ class MainWindow(QMainWindow):
         self.cameras_label = QLabel("Kameralar")
         self.cameras_label.setObjectName("SectionLabel")
 
-        self.list_widget = QListWidget()
-        self.list_widget.itemSelectionChanged.connect(self._on_list_selection)
-        self.list_widget.itemDoubleClicked.connect(self._on_list_double_clicked)
+        self.list_widget = CameraList()
+        self.list_widget.selection_changed.connect(self._on_list_selection)
+        self.list_widget.item_double_clicked_id.connect(self._on_list_double_clicked)
+        self.list_widget.customContextMenuRequested.connect(self._on_list_context_menu)
+        self.list_widget.order_changed.connect(self._on_order_changed)
+        self.list_widget.mute_toggled.connect(self._on_mute_toggled)
 
         self.add_btn = QPushButton("+ Kamera Ekle")
         self.add_btn.setObjectName("PrimaryButton")
         self.add_btn.clicked.connect(self._on_add_camera)
-
-        self.edit_btn = QPushButton("Düzenle")
-        self.edit_btn.clicked.connect(self._on_edit_camera)
-
-        self.remove_btn = QPushButton("Kaldır")
-        self.remove_btn.setObjectName("DangerButton")
-        self.remove_btn.clicked.connect(self._on_remove_camera)
-
-        edit_row = QHBoxLayout()
-        edit_row.setSpacing(8)
-        edit_row.addWidget(self.edit_btn)
-        edit_row.addWidget(self.remove_btn)
-
-        self.view_label = QLabel("Görünüm")
-        self.view_label.setObjectName("SectionLabel")
-
-        # Grid presets (1x1, 2x2, 3x3, 4x4).
-        self._preset_buttons: dict[int, QPushButton] = {}
-        preset_row = QHBoxLayout()
-        preset_row.setSpacing(6)
-        for n in (1, 2, 3, 4):
-            btn = QPushButton(f"{n}×{n}")
-            btn.setObjectName("PresetButton")
-            btn.setCheckable(True)
-            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            btn.clicked.connect(lambda _checked=False, val=n: self._on_preset_clicked(val))
-            self._preset_buttons[n] = btn
-            preset_row.addWidget(btn)
-
-        # Custom column count (for non-NxN layouts).
-        col_row = QHBoxLayout()
-        col_row.setSpacing(8)
-        self.col_label = QLabel("Sütun")
-        col_row.addWidget(self.col_label)
-        self.grid_spin = QSpinBox()
-        self.grid_spin.setRange(1, 8)
-        self.grid_spin.setValue(self._config.settings.grid_columns)
-        self.grid_spin.valueChanged.connect(self._on_grid_columns_changed)
-        col_row.addWidget(self.grid_spin, 1)
 
         self.restore_btn = QPushButton("Tüm Izgara")
         self.restore_btn.clicked.connect(self._on_restore)
@@ -139,14 +100,8 @@ class MainWindow(QMainWindow):
         body_layout.addWidget(self.cameras_label)
         body_layout.addWidget(self.list_widget, 1)
         body_layout.addWidget(self.add_btn)
-        body_layout.addLayout(edit_row)
-        body_layout.addSpacing(4)
-        body_layout.addWidget(self.view_label)
-        body_layout.addLayout(preset_row)
-        body_layout.addLayout(col_row)
         body_layout.addWidget(self.restore_btn)
         body_layout.addSpacing(4)
-        body_layout.addWidget(self._make_separator())
         body_layout.addWidget(self.ptz_panel)
         body_layout.addStretch(0)
         body_layout.addWidget(self.settings_btn)
@@ -156,6 +111,7 @@ class MainWindow(QMainWindow):
         # ---- Grid ----
         self.grid = CameraGrid(settings=self._config.settings)
         self.grid.selection_changed.connect(self._on_grid_selection_changed)
+        self.grid.tile_selected.connect(self._on_tile_selected)
 
         central = QWidget()
         layout = QHBoxLayout(central)
@@ -169,8 +125,10 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status)
         self._status_label = QLabel("Hazır")
         status.addWidget(self._status_label)
+        self._resource_monitor = ResourceMonitor()
+        status.addPermanentWidget(self._resource_monitor)
 
-        # Shortcuts
+        # Shortcuts.
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add_camera)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self._on_open_settings)
@@ -178,50 +136,27 @@ class MainWindow(QMainWindow):
 
         self._refresh_camera_list()
         self.grid.set_cameras(self._config.cameras)
-        self._update_button_states()
-        self._update_preset_states()
         self._apply_collapsed_state()
         self._update_status()
+        self.ptz_panel.set_camera(None)
 
     # -- helpers --
 
-    def _make_separator(self) -> QFrame:
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setFrameShadow(QFrame.Shadow.Plain)
-        sep.setObjectName("Separator")
-        sep.setFixedHeight(1)
-        return sep
+    def _refresh_camera_list(self, selected_id: str | None = None) -> None:
+        if selected_id is None:
+            selected_id = self.list_widget.selected_camera_id()
+        self.list_widget.populate(self._config.cameras, selected_id=selected_id)
 
-    def _refresh_camera_list(self) -> None:
-        self.list_widget.blockSignals(True)
-        self.list_widget.clear()
-        for cam in self._config.cameras:
-            item = QListWidgetItem(cam.name or cam.host)
-            item.setData(Qt.ItemDataRole.UserRole, cam.id)
-            item.setToolTip(cam.rtsp_url)
-            self.list_widget.addItem(item)
-        self.list_widget.blockSignals(False)
+    def _camera_by_id(self, cam_id: str | None) -> Camera | None:
+        if not cam_id:
+            return None
+        return next((c for c in self._config.cameras if c.id == cam_id), None)
 
     def _selected_camera(self) -> Camera | None:
-        item = self.list_widget.currentItem()
-        if item is None:
-            return None
-        cam_id = item.data(Qt.ItemDataRole.UserRole)
-        return next((c for c in self._config.cameras if c.id == cam_id), None)
+        return self._camera_by_id(self.list_widget.selected_camera_id())
 
     def _save(self) -> None:
         save_config(self._config)
-
-    def _update_button_states(self) -> None:
-        has_selection = self._selected_camera() is not None
-        self.edit_btn.setEnabled(has_selection)
-        self.remove_btn.setEnabled(has_selection)
-
-    def _update_preset_states(self) -> None:
-        cols = self._config.settings.grid_columns
-        for n, btn in self._preset_buttons.items():
-            btn.setChecked(n == cols)
 
     def _update_status(self) -> None:
         n = len(self._config.cameras)
@@ -237,7 +172,8 @@ class MainWindow(QMainWindow):
         )
         self.body_widget.setVisible(not self._collapsed)
         self.title_label.setVisible(not self._collapsed)
-        self.toggle_btn.setText("›" if self._collapsed else "☰")
+        # Bold, large arrows so the toggle is unmistakable when collapsed.
+        self.toggle_btn.setText("›" if self._collapsed else "‹")
         self.toggle_btn.setToolTip(
             "Kenar çubuğunu genişlet" if self._collapsed else "Kenar çubuğunu daralt"
         )
@@ -250,14 +186,59 @@ class MainWindow(QMainWindow):
 
     # -- handlers --
 
-    def _on_list_selection(self) -> None:
-        self._update_button_states()
-        self.ptz_panel.set_camera(self._selected_camera())
+    def _on_list_selection(self, camera_id: str) -> None:
+        cam = self._camera_by_id(camera_id) if camera_id else None
+        self.ptz_panel.set_camera(cam)
+        self.grid.select(camera_id or "")
 
-    def _on_list_double_clicked(self, item: QListWidgetItem) -> None:
-        cam_id = item.data(Qt.ItemDataRole.UserRole)
+    def _on_list_double_clicked(self, cam_id: str) -> None:
         if cam_id:
             self.grid.maximize(cam_id)
+
+    def _on_list_context_menu(self, pos: QPoint) -> None:
+        item = self.list_widget.itemAt(pos)
+        if item is None:
+            return
+        self.list_widget.setCurrentItem(item)
+
+        menu = QMenu(self)
+        edit_act = QAction("Düzenle", self)
+        edit_act.triggered.connect(self._on_edit_camera)
+        remove_act = QAction("Kaldır", self)
+        remove_act.triggered.connect(self._on_remove_camera)
+        menu.addAction(edit_act)
+        menu.addSeparator()
+        menu.addAction(remove_act)
+        menu.exec(self.list_widget.viewport().mapToGlobal(pos))
+
+    def _on_order_changed(self, ordered_ids: list) -> None:
+        by_id = {c.id: c for c in self._config.cameras}
+        new_order = [by_id[i] for i in ordered_ids if i in by_id]
+        # Append anything missing (shouldn't happen, but stay safe).
+        for c in self._config.cameras:
+            if c.id not in ordered_ids:
+                new_order.append(c)
+        self._config.cameras = new_order
+        self._save()
+        self.grid.set_cameras(self._config.cameras)
+        self._update_status()
+
+    def _on_mute_toggled(self, camera_id: str, audio_enabled: bool) -> None:
+        for cam in self._config.cameras:
+            if cam.id == camera_id:
+                cam.audio_enabled = audio_enabled
+                break
+        self._save()
+        self.grid.set_cameras(self._config.cameras)
+
+    def _on_tile_selected(self, camera_id: str) -> None:
+        if not camera_id:
+            return
+        if self.list_widget.selected_camera_id() != camera_id:
+            self.list_widget.select_by_id(camera_id)
+        else:
+            # Selection already correct, but make sure PTZ panel is up to date.
+            self.ptz_panel.set_camera(self._camera_by_id(camera_id))
 
     def _on_add_camera(self) -> None:
         dlg = CameraDialog(parent=self)
@@ -268,7 +249,7 @@ class MainWindow(QMainWindow):
                 return
             self._config.cameras.append(cam)
             self._save()
-            self._refresh_camera_list()
+            self._refresh_camera_list(selected_id=cam.id)
             self.grid.set_cameras(self._config.cameras)
             self._update_status()
 
@@ -284,11 +265,9 @@ class MainWindow(QMainWindow):
                     self._config.cameras[i] = updated
                     break
             self._save()
-            self._refresh_camera_list()
+            self._refresh_camera_list(selected_id=updated.id)
             self.grid.set_cameras(self._config.cameras)
-            # Refresh PTZ binding if the edited camera is the selected one.
-            if self._selected_camera() and self._selected_camera().id == updated.id:
-                self.ptz_panel.set_camera(self._selected_camera())
+            self.ptz_panel.set_camera(self._camera_by_id(updated.id))
 
     def _on_remove_camera(self) -> None:
         cam = self._selected_camera()
@@ -309,44 +288,16 @@ class MainWindow(QMainWindow):
         self.ptz_panel.set_camera(self._selected_camera())
         self._update_status()
 
-    def _on_grid_columns_changed(self, value: int) -> None:
-        self._config.settings.grid_columns = value
-        self._save()
-        self.grid.apply_settings(self._config.settings)
-        self._update_preset_states()
-        self._update_status()
-
-    def _on_preset_clicked(self, n: int) -> None:
-        if self._config.settings.grid_columns == n:
-            # Re-check the active button so the user gets visible feedback.
-            self._update_preset_states()
-            return
-        self.grid_spin.blockSignals(True)
-        self.grid_spin.setValue(n)
-        self.grid_spin.blockSignals(False)
-        self._config.settings.grid_columns = n
-        self._save()
-        self.grid.apply_settings(self._config.settings)
-        self._update_preset_states()
-        self._update_status()
-
     def _on_open_settings(self) -> None:
         dlg = SettingsDialog(self, self._config.settings)
         if dlg.exec() == SettingsDialog.DialogCode.Accepted:
             new_settings = dlg.result_settings()
-            target_fps_changed = new_settings.target_fps != self._config.settings.target_fps
             # Preserve sidebar state across settings changes.
             new_settings.sidebar_collapsed = self._config.settings.sidebar_collapsed
             self._config.settings = new_settings
-            self.grid_spin.blockSignals(True)
-            self.grid_spin.setValue(new_settings.grid_columns)
-            self.grid_spin.blockSignals(False)
             self._save()
+            # FPS / overlay / columns all apply live without restarting workers.
             self.grid.apply_settings(new_settings)
-            if target_fps_changed:
-                self.grid.stop_all()
-                self.grid.set_cameras(self._config.cameras)
-            self._update_preset_states()
             self._update_status()
 
     def _on_grid_selection_changed(self, camera_id: str) -> None:
@@ -364,5 +315,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         self.ptz_panel.shutdown()
         self.grid.stop_all()
+        self._resource_monitor.shutdown()
         self._save()
         super().closeEvent(event)

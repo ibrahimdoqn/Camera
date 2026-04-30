@@ -31,6 +31,7 @@ class Camera:
     stream: str = "stream1"  # Tapo: stream1 = HD, stream2 = SD
     custom_url: str = ""
     use_custom_url: bool = False
+    audio_enabled: bool = False  # default: all cameras muted
 
     @property
     def rtsp_url(self) -> str:
@@ -70,7 +71,11 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
-        cameras = [Camera(**c) for c in data.get("cameras", [])]
+        cam_fields = Camera.__dataclass_fields__
+        cameras = [
+            Camera(**{k: v for k, v in c.items() if k in cam_fields})
+            for c in data.get("cameras", [])
+        ]
         settings_data = data.get("settings", {})
         settings = Settings(**{k: v for k, v in settings_data.items() if k in Settings.__dataclass_fields__})
         return cls(cameras=cameras, settings=settings)

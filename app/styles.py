@@ -100,15 +100,33 @@ QPushButton#IconButton:hover {{
     color: {COLORS['text']};
 }}
 
-QPushButton#PresetButton {{
-    padding: 6px 4px;
-    font-size: 12px;
-    font-weight: 600;
+QPushButton#ToggleButton {{
+    background-color: {COLORS['bg_hover']};
+    border: 1px solid {COLORS['border']};
+    border-radius: 8px;
+    color: {COLORS['text']};
+    font-size: 22px;
+    font-weight: 900;
+    padding: 0 0 4px 0;
 }}
-QPushButton#PresetButton:checked {{
+QPushButton#ToggleButton:hover {{
     background-color: {COLORS['accent']};
     border: 1px solid {COLORS['accent']};
     color: white;
+}}
+
+QPushButton#MuteButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0;
+    font-size: 14px;
+}}
+QPushButton#MuteButton:hover {{
+    background-color: {COLORS['bg_hover']};
+}}
+QPushButton#MuteButton:checked {{
+    color: {COLORS['accent']};
 }}
 
 QPushButton#PtzButton {{
@@ -226,6 +244,29 @@ QStatusBar {{
     background-color: {COLORS['bg_elevated']};
     color: {COLORS['text_muted']};
     border-top: 1px solid {COLORS['border']};
+}}
+
+QLabel#ResourceLabel {{
+    color: {COLORS['text_muted']};
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}}
+
+QLabel#PtzCameraName {{
+    color: {COLORS['text']};
+    font-size: 13px;
+    font-weight: 600;
+    padding: 0 4px;
+}}
+
+QLabel#CameraRowName {{
+    color: {COLORS['text']};
+    font-size: 13px;
+    background: transparent;
+}}
+
+QListWidget::item:selected QLabel#CameraRowName {{
+    color: white;
 }}
 
 QToolTip {{

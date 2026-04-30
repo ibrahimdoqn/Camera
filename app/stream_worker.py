@@ -5,7 +5,7 @@ import time
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 
 
 class StreamWorker(QObject):
@@ -14,6 +14,7 @@ class StreamWorker(QObject):
     frame_ready = pyqtSignal(np.ndarray)
     status_changed = pyqtSignal(str)  # "connecting" | "online" | "offline" | "error"
     error = pyqtSignal(str)
+    finished = pyqtSignal()
 
     def __init__(self, url: str, target_fps: int = 20, reconnect_delay: float = 3.0) -> None:
         super().__init__()
@@ -25,12 +26,14 @@ class StreamWorker(QObject):
     def update_url(self, url: str) -> None:
         self._url = url
 
+    def update_target_fps(self, fps: int) -> None:
+        self._target_fps = max(1, int(fps))
+
     def stop(self) -> None:
         self._running = False
 
     def run(self) -> None:
         self._running = True
-        frame_interval = 1.0 / self._target_fps
 
         while self._running:
             self.status_changed.emit("connecting")
@@ -61,7 +64,9 @@ class StreamWorker(QObject):
                 consecutive_failures = 0
 
                 now = time.monotonic()
-                if now - last_emit >= frame_interval:
+                # Re-read each iteration so a settings change applies immediately.
+                interval = 1.0 / max(1, self._target_fps)
+                if now - last_emit >= interval:
                     last_emit = now
                     self.frame_ready.emit(frame)
 
@@ -71,10 +76,9 @@ class StreamWorker(QObject):
                 self._sleep_interruptible(self._reconnect_delay)
 
         self.status_changed.emit("offline")
+        self.finished.emit()
 
     def _sleep_interruptible(self, seconds: float) -> None:
         end = time.monotonic() + seconds
         while self._running and time.monotonic() < end:
             time.sleep(0.1)
-
-

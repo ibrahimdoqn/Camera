@@ -1,8 +1,10 @@
-"""Grid view of camera tiles with click-to-maximize.
+"""Grid view of camera tiles.
 
 Tiles are sized to preserve a fixed aspect ratio (16:9 by default), so the
 grid never stretches a tile vertically. Both column and row counts are
 honored: rows are computed from camera count and the chosen column count.
+
+Click a tile to select it; double-click to maximize / restore.
 """
 from __future__ import annotations
 
@@ -40,7 +42,10 @@ class AspectGrid(QWidget):
         self._relayout()
 
     def set_columns(self, columns: int) -> None:
-        self._columns = max(1, columns)
+        cols = max(1, columns)
+        if cols == self._columns:
+            return
+        self._columns = cols
         self._relayout()
 
     def set_aspect(self, aspect: float) -> None:
@@ -90,13 +95,16 @@ class AspectGrid(QWidget):
 class CameraGrid(QWidget):
     """Holds CameraTile widgets in a grid; supports maximizing one tile."""
 
-    selection_changed = pyqtSignal(str)
+    selection_changed = pyqtSignal(str)  # emits when maximize toggles
+    tile_selected = pyqtSignal(str)      # emits on tile single click
 
     def __init__(self, settings: Settings, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._settings = settings
+        # Insertion-ordered, drives display order.
         self._tiles: dict[str, CameraTile] = {}
         self._maximized_id: Optional[str] = None
+        self._selected_id: Optional[str] = None
 
         self._stack = QStackedLayout(self)
         self._stack.setStackingMode(QStackedLayout.StackingMode.StackOne)
@@ -121,6 +129,8 @@ class CameraGrid(QWidget):
             tile.setParent(None)
             tile.deleteLater()
 
+        # Rebuild ordered dict so display order matches the camera list.
+        new_order: dict[str, CameraTile] = {}
         for cam in cameras:
             tile = self._tiles.get(cam.id)
             if tile is None:
@@ -132,15 +142,18 @@ class CameraGrid(QWidget):
                 )
                 tile.clicked.connect(self._on_tile_clicked)
                 tile.double_clicked.connect(self._on_tile_double_clicked)
-                self._tiles[cam.id] = tile
                 tile.start()
             else:
                 tile.update_camera(cam)
+            new_order[cam.id] = tile
+        self._tiles = new_order
 
         if self._maximized_id and self._maximized_id not in self._tiles:
             self._maximized_id = None
             self._stack.setCurrentIndex(0)
             self.selection_changed.emit("")
+        if self._selected_id and self._selected_id not in self._tiles:
+            self._selected_id = None
 
         self._refresh_layout()
 
@@ -148,6 +161,7 @@ class CameraGrid(QWidget):
         self._settings = settings
         for tile in self._tiles.values():
             tile.set_show_overlay(settings.show_overlay)
+            tile.set_target_fps(settings.target_fps)
         self._grid_host.set_columns(settings.grid_columns)
         self._refresh_layout()
 
@@ -163,7 +177,6 @@ class CameraGrid(QWidget):
             return
         self._maximized_id = camera_id
         tile = self._tiles[camera_id]
-        # Move tile into the maximize host.
         self._grid_host.set_tiles(
             [t for t in self._tiles.values() if t is not tile]
         )
@@ -186,12 +199,22 @@ class CameraGrid(QWidget):
         else:
             self.maximize(camera_id)
 
+    def select(self, camera_id: str) -> None:
+        if self._selected_id == camera_id:
+            return
+        self._selected_id = camera_id
+        for cid, tile in self._tiles.items():
+            tile.set_selected(cid == camera_id)
+
     # -- internal --
 
     def _on_tile_clicked(self, camera_id: str) -> None:
-        self.toggle_maximize(camera_id)
+        self.select(camera_id)
+        self.tile_selected.emit(camera_id)
 
     def _on_tile_double_clicked(self, camera_id: str) -> None:
+        self.select(camera_id)
+        self.tile_selected.emit(camera_id)
         self.toggle_maximize(camera_id)
 
     def _refresh_layout(self) -> None:

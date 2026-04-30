@@ -1,8 +1,8 @@
-"""PTZ control panel: direction arrows, zoom, and preset list.
+"""PTZ control panel: direction arrows and preset list.
 
 The panel is bound to one camera at a time via :meth:`set_camera`. It owns
 the active :class:`PtzController` and tears it down when the camera changes
-or the panel is closed.
+or the panel is closed. The panel hides itself when no camera is bound.
 """
 from __future__ import annotations
 
@@ -27,7 +27,6 @@ from .onvif_ptz import PtzController, PtzPreset
 
 PAN_SPEED = 0.5
 TILT_SPEED = 0.5
-ZOOM_SPEED = 0.5
 
 
 class HoldButton(QPushButton):
@@ -48,7 +47,7 @@ class HoldButton(QPushButton):
 
 
 class PtzPanel(QWidget):
-    """PTZ control panel bound to a single camera."""
+    """PTZ control panel bound to a single camera. Hidden when unbound."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -59,16 +58,24 @@ class PtzPanel(QWidget):
 
         self._build_ui()
         self._update_enabled_state()
+        self.setVisible(False)
 
     # -------------------- UI --------------------
 
     def _build_ui(self) -> None:
-        section = QLabel("Kamera Hareketi")
+        section = QLabel("Hareket")
         section.setObjectName("SectionLabel")
+        section.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self._status = QLabel("Kamera seçili değil")
+        self._name_label = QLabel("")
+        self._name_label.setObjectName("PtzCameraName")
+        self._name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._name_label.setWordWrap(True)
+
+        self._status = QLabel("")
         self._status.setObjectName("MutedLabel")
         self._status.setWordWrap(True)
+        self._status.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # Direction pad (3x3 grid: only the cross is filled).
         pad = QWidget()
@@ -87,30 +94,24 @@ class PtzPanel(QWidget):
 
         for b in (self._btn_up, self._btn_down, self._btn_left, self._btn_right, self._btn_home):
             b.setObjectName("PtzButton")
-            b.setFixedSize(40, 36)
+            b.setFixedSize(44, 40)
 
         pad_layout.addWidget(self._btn_up, 0, 1)
         pad_layout.addWidget(self._btn_left, 1, 0)
         pad_layout.addWidget(self._btn_home, 1, 1)
         pad_layout.addWidget(self._btn_right, 1, 2)
         pad_layout.addWidget(self._btn_down, 2, 1)
-        pad_layout.setColumnStretch(0, 1)
-        pad_layout.setColumnStretch(3, 1)
 
-        # Zoom row.
-        zoom_row = QHBoxLayout()
-        zoom_row.setSpacing(8)
-        self._btn_zoom_in = HoldButton("Yakınlaştır +")
-        self._btn_zoom_out = HoldButton("Uzaklaştır −")
-        for b in (self._btn_zoom_in, self._btn_zoom_out):
-            b.setObjectName("PtzButton")
-            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        zoom_row.addWidget(self._btn_zoom_in, 1)
-        zoom_row.addWidget(self._btn_zoom_out, 1)
+        # Center the pad horizontally inside the sidebar.
+        pad_row = QHBoxLayout()
+        pad_row.addStretch(1)
+        pad_row.addWidget(pad)
+        pad_row.addStretch(1)
 
         # Preset row.
         preset_label = QLabel("Konumlar")
         preset_label.setObjectName("SectionLabel")
+        preset_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._preset_combo = QComboBox()
         self._preset_combo.setPlaceholderText("Konum yok")
         self._btn_goto = QPushButton("Git")
@@ -123,16 +124,18 @@ class PtzPanel(QWidget):
         preset_row.addWidget(self._preset_combo, 1)
         preset_row.addWidget(self._btn_goto)
 
-        # Container layout.
+        # Container layout (centered).
         container = QFrame()
         container.setObjectName("PtzPanel")
+        container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        layout.setAlignment(Qt.AlignmentFlag.AlignHCenter)
         layout.addWidget(section)
+        layout.addWidget(self._name_label)
         layout.addWidget(self._status)
-        layout.addWidget(pad)
-        layout.addLayout(zoom_row)
+        layout.addLayout(pad_row)
         layout.addWidget(preset_label)
         layout.addLayout(preset_row)
 
@@ -146,11 +149,8 @@ class PtzPanel(QWidget):
         self._btn_down.held.connect(lambda: self._move(0.0, -TILT_SPEED, 0.0))
         self._btn_left.held.connect(lambda: self._move(-PAN_SPEED, 0.0, 0.0))
         self._btn_right.held.connect(lambda: self._move(PAN_SPEED, 0.0, 0.0))
-        self._btn_zoom_in.held.connect(lambda: self._move(0.0, 0.0, ZOOM_SPEED))
-        self._btn_zoom_out.held.connect(lambda: self._move(0.0, 0.0, -ZOOM_SPEED))
 
-        for hb in (self._btn_up, self._btn_down, self._btn_left,
-                   self._btn_right, self._btn_zoom_in, self._btn_zoom_out):
+        for hb in (self._btn_up, self._btn_down, self._btn_left, self._btn_right):
             hb.released_.connect(self._stop)
 
         self._btn_home.clicked.connect(self._stop)
@@ -159,6 +159,7 @@ class PtzPanel(QWidget):
 
     def set_camera(self, camera: Optional[Camera]) -> None:
         if camera is None and self._camera is None:
+            self.setVisible(False)
             return
         if camera is not None and self._camera is not None and camera.id == self._camera.id:
             # Only refresh credentials if they changed.
@@ -167,6 +168,7 @@ class PtzPanel(QWidget):
                     and camera.username == self._camera.username
                     and camera.password == self._camera.password):
                 self._camera = camera
+                self._name_label.setText(camera.name or camera.host)
                 return
 
         self._teardown_controller()
@@ -176,9 +178,14 @@ class PtzPanel(QWidget):
         self._preset_combo.clear()
 
         if camera is None:
-            self._status.setText("Kamera seçili değil")
+            self._name_label.setText("")
+            self._status.setText("")
             self._update_enabled_state()
+            self.setVisible(False)
             return
+
+        self.setVisible(True)
+        self._name_label.setText(camera.name or camera.host)
 
         if not camera.host:
             self._status.setText("Host bilgisi yok, ONVIF kullanılamaz")
@@ -226,7 +233,6 @@ class PtzPanel(QWidget):
         self._update_enabled_state()
 
     def _on_error(self, message: str) -> None:
-        # Keep the panel alive but surface the issue in the status line.
         self._status.setText(message)
 
     def _move(self, pan: float, tilt: float, zoom: float) -> None:
@@ -248,8 +254,8 @@ class PtzPanel(QWidget):
 
     def _update_enabled_state(self) -> None:
         movable = self._supported and self._controller is not None
-        for b in (self._btn_up, self._btn_down, self._btn_left, self._btn_right,
-                  self._btn_home, self._btn_zoom_in, self._btn_zoom_out):
+        for b in (self._btn_up, self._btn_down, self._btn_left,
+                  self._btn_right, self._btn_home):
             b.setEnabled(movable)
         has_preset = movable and self._preset_combo.count() > 0
         self._preset_combo.setEnabled(has_preset)

@@ -5,7 +5,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QThread, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QThread, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
     QFont,
@@ -34,10 +34,10 @@ STATUS_COLORS = {
 
 
 class CameraTile(QWidget):
-    """Renders one camera. Click to maximize, double-click also toggles maximize."""
+    """Renders one camera. Click selects, double-click toggles maximize."""
 
-    clicked = pyqtSignal(str)  # emits camera id
-    double_clicked = pyqtSignal(str)
+    clicked = pyqtSignal(str)         # single click → select
+    double_clicked = pyqtSignal(str)  # double click → toggle maximize
 
     def __init__(self, camera: Camera, target_fps: int = 20, reconnect_delay: float = 3.0,
                  show_overlay: bool = True, parent: Optional[QWidget] = None) -> None:
@@ -46,6 +46,7 @@ class CameraTile(QWidget):
         self._target_fps = target_fps
         self._reconnect_delay = reconnect_delay
         self._show_overlay = show_overlay
+        self._selected = False
 
         self._pixmap: Optional[QPixmap] = None
         self._status: str = "idle"
@@ -57,6 +58,10 @@ class CameraTile(QWidget):
 
         self._worker: Optional[StreamWorker] = None
         self._thread: Optional[QThread] = None
+
+        # Audio playback (lazy-init, only when enabled).
+        self._audio_player = None
+        self._audio_output = None
 
         self.setMinimumSize(QSize(240, 140))
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
@@ -83,18 +88,22 @@ class CameraTile(QWidget):
         worker.frame_ready.connect(self._on_frame)
         worker.status_changed.connect(self._on_status)
         worker.error.connect(self._on_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
         thread.start()
         self._worker = worker
         self._thread = thread
+        self._apply_audio_state()
 
     def stop(self) -> None:
         if self._worker is not None:
             self._worker.stop()
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait(2000)
+        # Don't block the UI thread waiting for the worker — let it shut down
+        # asynchronously via the finished signal.
         self._worker = None
         self._thread = None
+        self._stop_audio()
         self._status = "idle"
         self.update()
 
@@ -107,16 +116,71 @@ class CameraTile(QWidget):
         self._show_overlay = value
         self.update()
 
+    def set_target_fps(self, fps: int) -> None:
+        self._target_fps = max(1, int(fps))
+        if self._worker is not None:
+            self._worker.update_target_fps(self._target_fps)
+
+    def set_selected(self, value: bool) -> None:
+        if self._selected != value:
+            self._selected = value
+            self.update()
+
     def update_camera(self, camera: Camera) -> None:
         old_url = self.camera.rtsp_url if self.camera else ""
+        old_audio = self.camera.audio_enabled if self.camera else False
         self.camera = camera
         if self._worker is not None and old_url != camera.rtsp_url:
-            # Force reconnect with new URL.
+            # Force a reconnect with the new URL. stop()/start() are
+            # non-blocking now, so this is safe on the UI thread.
             self.stop()
             self.start()
-        elif self._worker is not None:
-            self._worker.update_url(camera.rtsp_url)
+        elif old_audio != camera.audio_enabled:
+            self._apply_audio_state()
         self.update()
+
+    # -- audio --
+
+    def _apply_audio_state(self) -> None:
+        if self.camera.audio_enabled and self._worker is not None:
+            self._start_audio()
+        else:
+            self._stop_audio()
+
+    def _start_audio(self) -> None:
+        if self._audio_player is not None:
+            return
+        try:
+            from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+        except ImportError:
+            return
+        try:
+            player = QMediaPlayer(self)
+            output = QAudioOutput(self)
+            player.setAudioOutput(output)
+            player.setSource(QUrl(self.camera.rtsp_url))
+            output.setVolume(1.0)
+            player.play()
+            self._audio_player = player
+            self._audio_output = output
+        except Exception:
+            self._audio_player = None
+            self._audio_output = None
+
+    def _stop_audio(self) -> None:
+        if self._audio_player is not None:
+            try:
+                self._audio_player.stop()
+                self._audio_player.deleteLater()
+            except Exception:
+                pass
+            self._audio_player = None
+        if self._audio_output is not None:
+            try:
+                self._audio_output.deleteLater()
+            except Exception:
+                pass
+            self._audio_output = None
 
     # -- worker callbacks --
 
@@ -159,9 +223,9 @@ class CameraTile(QWidget):
 
         painter.setClipping(False)
 
-        # Border.
-        pen = QPen(QColor("#2c2c2e"))
-        pen.setWidth(1)
+        # Border (highlighted when selected).
+        pen = QPen(QColor("#0a84ff" if self._selected else "#2c2c2e"))
+        pen.setWidth(2 if self._selected else 1)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRoundedRect(rect, radius, radius)
@@ -191,7 +255,6 @@ class CameraTile(QWidget):
         # Center + pan.
         cx = rect.center().x() + self._pan.x()
         cy = rect.center().y() + self._pan.y()
-        target = QRectF(cx - draw_w / 2, cy - draw_h / 2, draw_w, draw_h)
 
         # If zoom > 1, clamp pan so the image still covers the visible area.
         if self._zoom > 1.0:
@@ -202,8 +265,8 @@ class CameraTile(QWidget):
             cx = max(min(cx, max_x), min_x)
             cy = max(min(cy, max_y), min_y)
             self._pan = QPointF(cx - rect.center().x(), cy - rect.center().y())
-            target = QRectF(cx - draw_w / 2, cy - draw_h / 2, draw_w, draw_h)
 
+        target = QRectF(cx - draw_w / 2, cy - draw_h / 2, draw_w, draw_h)
         painter.fillRect(rect, QColor("#000000"))
         painter.drawPixmap(target, pix, QRectF(0, 0, pw, ph))
 
@@ -314,6 +377,7 @@ class CameraTile(QWidget):
         was_dragging = self._dragging
         self._dragging = False
         if event.button() == Qt.MouseButton.LeftButton and was_dragging and not moved:
+            # Single click: select only (does NOT toggle maximize).
             self.clicked.emit(self.camera.id)
         super().mouseReleaseEvent(event)
 
