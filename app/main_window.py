@@ -1,7 +1,7 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QCloseEvent,
@@ -435,9 +435,25 @@ class MainWindow(QMainWindow):
             return
         cam.visible = visible
         self._save()
-        # Only the grid changes — the sidebar already updated its row state
-        # in-place when the user clicked the eye, and we don't want to
-        # rebuild it here (that would interrupt any drag/selection).
+        self._update_status()
+        # Defer the grid rebuild (which tears down the camera's RTSP
+        # worker, audio backend and tile widget when hiding) to the next
+        # event-loop tick. Doing it inline crashed the process because we
+        # were still inside the QPushButton click handler that fired the
+        # ``visibility_toggled`` signal — Qt's button state machine, our
+        # libVLC teardown and the deleteLater chain do not survive being
+        # interleaved on the same call stack on Windows. Same trick the
+        # drag-and-drop reorder code uses (`_on_rows_moved`).
+        QTimer.singleShot(
+            0,
+            lambda cid=camera_id, v=visible: self._apply_visibility_change(cid, v),
+        )
+
+    def _apply_visibility_change(self, camera_id: str, visible: bool) -> None:
+        # Re-check: the user might have toggled again while we were queued.
+        cam = self._camera_by_id(camera_id)
+        if cam is None or cam.visible != visible:
+            return
         self.grid.set_cameras(self._visible_cameras())
         # If the now-hidden camera was the selected one, drop the PTZ panel.
         if not visible and self.list_widget.selected_camera_id() == camera_id:

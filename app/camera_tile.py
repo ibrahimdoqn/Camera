@@ -282,29 +282,32 @@ class CameraTile(QWidget):
             self._audio_backend = None
 
     def _stop_audio(self) -> None:
+        # libVLC's release() can re-enter Python via internal callbacks and
+        # has been observed to crash the process when fired from inside a
+        # QPushButton click handler (which is what happens on the
+        # "hide camera" path). We deliberately *don't* call release() here:
+        # we just stop playback and drop our Python references, letting
+        # the GC tear the libVLC objects down out of the click stack.
+        # Every step is guarded so a misbehaving backend never propagates
+        # an exception up into the UI's tear-down sequence.
         backend = getattr(self, "_audio_backend", None)
         if self._audio_player is not None:
             try:
                 self._audio_player.stop()
-                if backend == "vlc":
-                    # libVLC keeps native handles alive until release() is
-                    # called. Not releasing meant rapid hide/unhide cycles
-                    # leaked threads inside libvlc.dll and occasionally
-                    # deadlocked on the next start.
-                    self._audio_player.release()
-                else:
-                    self._audio_player.deleteLater()
             except Exception:
                 pass
+            if backend != "vlc":
+                try:
+                    self._audio_player.deleteLater()
+                except Exception:
+                    pass
             self._audio_player = None
         if self._audio_output is not None:
-            try:
-                if backend == "vlc":
-                    self._audio_output.release()
-                else:
+            if backend != "vlc":
+                try:
                     self._audio_output.deleteLater()
-            except Exception:
-                pass
+                except Exception:
+                    pass
             self._audio_output = None
         self._audio_backend = None
 
