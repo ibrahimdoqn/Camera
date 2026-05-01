@@ -21,6 +21,7 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import Camera, Settings
+from .stream_worker import detect_supported_hw_accels
 
 
 class CameraDialog(QDialog):
@@ -184,8 +185,20 @@ class SettingsDialog(QDialog):
         self.reconnect_spin.setValue(int(settings.reconnect_delay))
         self.reconnect_spin.setSuffix(" sn")
 
+        # Only expose hardware acceleration modes that the current platform
+        # could plausibly run. Showing ``cuda`` on a non-NVIDIA GPU or
+        # ``d3d11va`` on Linux just leaves users staring at black tiles,
+        # because FFmpeg quietly falls through to a path that produces no
+        # frames. ``auto`` and ``none`` are always present. If the user's
+        # saved setting refers to a now-unavailable mode (e.g. they moved
+        # config files between machines), we add it back so the dropdown
+        # still reflects what's actually persisted instead of silently
+        # rewriting it.
         self.hw_combo = QComboBox()
-        for opt in ("auto", "none", "dxva2", "d3d11va", "cuda"):
+        supported = list(detect_supported_hw_accels())
+        if settings.hw_accel and settings.hw_accel not in supported:
+            supported.append(settings.hw_accel)
+        for opt in supported:
             self.hw_combo.addItem(opt)
         idx = self.hw_combo.findText(settings.hw_accel)
         if idx >= 0:

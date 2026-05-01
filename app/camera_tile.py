@@ -109,11 +109,41 @@ class CameraTile(QWidget):
         self._thread = thread
         self._apply_audio_state()
 
+    def _detach_worker_signals(self) -> None:
+        """Disconnect the tile's slots from the live worker.
+
+        The worker keeps running until its capture loop notices
+        ``_running=False`` (cap.read can hold the thread for several
+        seconds), and during that window it can still emit
+        ``frame_ready`` / ``status_changed`` / ``error``. If the tile is
+        deleted in the meantime — which is exactly what happens when the
+        user hides the camera or changes hardware acceleration — those
+        queued signals would be dispatched to a half-deleted Python
+        wrapper and crash the process. Disconnecting before we drop the
+        Python reference makes the queue harmless: the worker's signals
+        simply have nowhere left to go.
+        """
+        worker = self._worker
+        if worker is None:
+            return
+        for sig, slot in (
+            (worker.frame_ready, self._on_frame),
+            (worker.status_changed, self._on_status),
+            (worker.error, self._on_error),
+        ):
+            try:
+                sig.disconnect(slot)
+            except (TypeError, RuntimeError):
+                # Already disconnected, or the underlying C++ object is gone.
+                pass
+
     def stop(self) -> None:
         if self._worker is not None:
+            self._detach_worker_signals()
             self._worker.stop()
         # Don't block the UI thread waiting for the worker — let it shut down
-        # asynchronously via the finished signal.
+        # asynchronously via the finished signal. Signals are already
+        # detached, so the in-flight worker can run to completion safely.
         self._worker = None
         self._thread = None
         self._stop_audio()
@@ -124,6 +154,7 @@ class CameraTile(QWidget):
         """Block briefly so the worker thread can exit cleanly. Use on close."""
         thread = self._thread
         if self._worker is not None:
+            self._detach_worker_signals()
             self._worker.stop()
         self._worker = None
         self._thread = None
@@ -254,18 +285,23 @@ class CameraTile(QWidget):
         backend = getattr(self, "_audio_backend", None)
         if self._audio_player is not None:
             try:
+                self._audio_player.stop()
                 if backend == "vlc":
-                    self._audio_player.stop()
-                    # vlc objects don't have deleteLater(); just drop refs.
+                    # libVLC keeps native handles alive until release() is
+                    # called. Not releasing meant rapid hide/unhide cycles
+                    # leaked threads inside libvlc.dll and occasionally
+                    # deadlocked on the next start.
+                    self._audio_player.release()
                 else:
-                    self._audio_player.stop()
                     self._audio_player.deleteLater()
             except Exception:
                 pass
             self._audio_player = None
         if self._audio_output is not None:
             try:
-                if backend != "vlc":
+                if backend == "vlc":
+                    self._audio_output.release()
+                else:
                     self._audio_output.deleteLater()
             except Exception:
                 pass

@@ -203,10 +203,19 @@ class CameraRow(QWidget):
             "Izgarada göster" if self._hidden else "Izgaradan gizle"
         )
         # Re-polish so the [hidden="true"] QSS selector takes effect on the
-        # row's text colours.
+        # row's text colours. Qt does NOT automatically re-polish child
+        # widgets when a parent's dynamic property changes — without the
+        # extra unpolish/polish pass on each label below, ``CameraRowName``
+        # and ``CameraRowSub`` would stay stuck on the muted/italic palette
+        # after the user un-hides a camera (the descendant selector
+        # ``QWidget#CameraRow[hidden="true"] QLabel#…`` had already cached
+        # the colour on the child). Refreshing both children is what makes
+        # the row return to the regular (white) text colour immediately.
         self.setProperty("hidden", self._hidden)
-        self.style().unpolish(self)
-        self.style().polish(self)
+        for w in (self, self._name, self._sub):
+            w.style().unpolish(w)
+            w.style().polish(w)
+        self.update()
 
     def _set_mute_visual(self, audio_on: bool) -> None:
         self._mute_btn.blockSignals(True)
