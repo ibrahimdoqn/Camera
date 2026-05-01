@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QPainter, QPaintEvent, QPen
 from PyQt6.QtWidgets import (
     QComboBox,
     QFrame,
@@ -29,21 +30,99 @@ PAN_SPEED = 0.5
 TILT_SPEED = 0.5
 
 
-class HoldButton(QPushButton):
-    """Button that emits ``held`` on press and ``released_`` on release.
+class _PaintedPtzButton(QPushButton):
+    """Base for PTZ buttons whose glyph is painted with QPainter so it
+    stays perfectly centred regardless of the underlying font."""
 
-    Used for continuous PTZ movement: start moving on press, stop on release.
-    """
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setAutoDefault(False)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def _glyph_color(self) -> QColor:
+        if not self.isEnabled():
+            return QColor("#6a6a70")
+        if self.isDown():
+            return QColor("#ffffff")
+        if self.underMouse():
+            return QColor("#ffffff")
+        return QColor("#f2f2f7")
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self._paint_glyph(painter)
+
+    def _paint_glyph(self, painter: QPainter) -> None:  # noqa: D401
+        """Override in subclasses."""
+
+
+class _ArrowButton(_PaintedPtzButton):
+    """Direction-pad arrow with a hold/release signal pair for continuous
+    movement (press to start moving, release to stop)."""
 
     held = pyqtSignal()
     released_ = pyqtSignal()
 
-    def __init__(self, label: str, parent: Optional[QWidget] = None) -> None:
-        super().__init__(label, parent)
-        self.setAutoDefault(False)
-        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+    DIRECTIONS = ("up", "down", "left", "right")
+
+    def __init__(self, direction: str,
+                 parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        if direction not in self.DIRECTIONS:
+            raise ValueError(f"unknown PTZ direction: {direction!r}")
+        self._direction = direction
         self.pressed.connect(self.held.emit)
         self.released.connect(self.released_.emit)
+
+    def _paint_glyph(self, painter: QPainter) -> None:
+        rect = QRectF(self.rect())
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+        # Slightly smaller arrow than the button so it never crowds the edge.
+        size = 6.5
+        if self._direction == "up":
+            tip = QPointF(cx, cy - size)
+            left = QPointF(cx - size, cy + size * 0.55)
+            right = QPointF(cx + size, cy + size * 0.55)
+        elif self._direction == "down":
+            tip = QPointF(cx, cy + size)
+            left = QPointF(cx - size, cy - size * 0.55)
+            right = QPointF(cx + size, cy - size * 0.55)
+        elif self._direction == "left":
+            tip = QPointF(cx - size, cy)
+            left = QPointF(cx + size * 0.55, cy - size)
+            right = QPointF(cx + size * 0.55, cy + size)
+        else:  # right
+            tip = QPointF(cx + size, cy)
+            left = QPointF(cx - size * 0.55, cy - size)
+            right = QPointF(cx - size * 0.55, cy + size)
+        pen = QPen(self._glyph_color())
+        pen.setWidthF(2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(left, tip)
+        painter.drawLine(right, tip)
+
+
+class _StopButton(_PaintedPtzButton):
+    """Centre button: draws a small filled square (universal stop)."""
+
+    def _paint_glyph(self, painter: QPainter) -> None:
+        rect = QRectF(self.rect())
+        cx = rect.center().x()
+        cy = rect.center().y()
+        side = 9.0
+        sq = QRectF(cx - side / 2, cy - side / 2, side, side)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._glyph_color())
+        painter.drawRoundedRect(sq, 1.5, 1.5)
+
+
+# Backwards-compatible alias retained in case external callers reference it.
+HoldButton = _ArrowButton
 
 
 class PtzPanel(QWidget):
@@ -89,14 +168,12 @@ class PtzPanel(QWidget):
         pad_layout.setContentsMargins(0, 0, 0, 0)
         pad_layout.setSpacing(6)
 
-        self._btn_up = HoldButton("↑")
-        self._btn_down = HoldButton("↓")
-        self._btn_left = HoldButton("←")
-        self._btn_right = HoldButton("→")
-        self._btn_home = QPushButton("⌂")
+        self._btn_up = _ArrowButton("up")
+        self._btn_down = _ArrowButton("down")
+        self._btn_left = _ArrowButton("left")
+        self._btn_right = _ArrowButton("right")
+        self._btn_home = _StopButton()
         self._btn_home.setToolTip("Durdur")
-        self._btn_home.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._btn_home.setAutoDefault(False)
 
         for b in (self._btn_up, self._btn_down, self._btn_left, self._btn_right, self._btn_home):
             b.setObjectName("PtzButton")

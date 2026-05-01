@@ -1,10 +1,19 @@
 """Animated startup splash screen.
 
-A frameless, rounded, centred widget with a soft fade-in/fade-out and an
-orbiting-dots spinner. The splash is responsible for keeping itself on
-screen long enough for cameras to connect: callers can either tell it
-how many cameras to wait for and report when each one delivers its first
-frame (:meth:`mark_camera_ready`) or simply let the timeout expire.
+A frameless, rounded, centred widget with a soft fade-in/fade-out and a
+Windows 11-style sweeping arc (the "progress ring" pattern). The splash is
+responsible for keeping itself on screen long enough for cameras to
+connect: callers can either tell it how many cameras to wait for and
+report when each one delivers its first frame
+(:meth:`mark_camera_ready`) or simply let the timeout expire.
+
+Notes:
+* The translucent shadow used to be done with ``QGraphicsDropShadowEffect``
+  on a translucent top-level window. On Windows that combination triggers
+  ``UpdateLayeredWindowIndirect failed`` because the dirty rectangle ends
+  up larger than the window with negative offsets. We now paint the
+  shadow ourselves into a larger, transparent canvas so the dirty
+  rectangle always fits inside the widget.
 """
 from __future__ import annotations
 
@@ -29,7 +38,13 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPen,
 )
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect, QWidget
+from PyQt6.QtWidgets import QWidget
+
+
+# Padding around the card itself, used as the room for the painted shadow.
+SHADOW_MARGIN = 24
+CARD_W = 440
+CARD_H = 260
 
 
 class SplashScreen(QWidget):
@@ -48,11 +63,16 @@ class SplashScreen(QWidget):
                          | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(440, 260)
+        # Make room for the painted drop shadow so we never have to resize
+        # outside the widget — the layered-window paint path on Windows
+        # rejects dirty rectangles with negative offsets.
+        self.setFixedSize(CARD_W + SHADOW_MARGIN * 2,
+                          CARD_H + SHADOW_MARGIN * 2)
 
         self._total = max(0, total_cameras)
         self._ready_ids: set[str] = set()
-        self._message = "Yükleniyor..."
+        self._message = self._format_progress()
+        self._stage = "Başlatılıyor"
         self._angle = 0.0
 
         # Centre on the primary screen.
@@ -62,9 +82,10 @@ class SplashScreen(QWidget):
             self.move(geo.center().x() - self.width() // 2,
                       geo.center().y() - self.height() // 2)
 
-        # Spinner animation tick.
+        # Spinner animation tick. The Windows 11 progress ring sweeps a
+        # single arc smoothly so we drive it at ~60 Hz.
         self._spin = QTimer(self)
-        self._spin.setInterval(33)  # ~30 Hz
+        self._spin.setInterval(16)
         self._spin.timeout.connect(self._tick)
 
         # Hard timeout — close even if no camera ever reports ready.
@@ -80,13 +101,6 @@ class SplashScreen(QWidget):
         self._min_timer.setSingleShot(True)
         self._min_timer.setInterval(self.MIN_LIFETIME_MS)
         self._min_timer.timeout.connect(self._on_min_elapsed)
-
-        # Drop shadow.
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(40)
-        shadow.setColor(QColor(0, 0, 0, 200))
-        shadow.setOffset(0, 6)
-        self.setGraphicsEffect(shadow)
 
         # Fade in/out using window opacity.
         self._opacity = 0.0
@@ -128,11 +142,17 @@ class SplashScreen(QWidget):
         self._message = text
         self.update()
 
+    def set_stage(self, text: str) -> None:
+        """Update the current high-level stage (e.g. 'ONVIF aranıyor')."""
+        self._stage = text
+        self.update()
+
     def mark_camera_ready(self, camera_id: str) -> None:
         """Report that one camera has delivered its first frame."""
         if not camera_id:
             return
         self._ready_ids.add(camera_id)
+        self._stage = "Kameralar bağlanıyor"
         self.set_message(self._format_progress())
         if self._total and len(self._ready_ids) >= self._total and self._min_elapsed:
             self._begin_fade_out()
@@ -141,8 +161,8 @@ class SplashScreen(QWidget):
 
     def _format_progress(self) -> str:
         if not self._total:
-            return "Yükleniyor..."
-        return f"Kameralar bağlanıyor   {len(self._ready_ids)}/{self._total}"
+            return "Hazırlanıyor..."
+        return f"{len(self._ready_ids)} / {self._total} kamera hazır"
 
     def _on_min_elapsed(self) -> None:
         self._min_elapsed = True
@@ -154,6 +174,7 @@ class SplashScreen(QWidget):
             self._begin_fade_out()
 
     def _tick(self) -> None:
+        # ~360°/second — feels active but not jittery.
         self._angle = (self._angle + 6.0) % 360.0
         self.update()
 
@@ -174,8 +195,15 @@ class SplashScreen(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
 
-        rect = QRectF(0, 0, self.width(), self.height()).adjusted(8, 8, -8, -8)
-        radius = 24
+        # Inner card rect (the visible window) leaves SHADOW_MARGIN on each
+        # side for the painted drop shadow.
+        rect = QRectF(SHADOW_MARGIN, SHADOW_MARGIN, CARD_W, CARD_H)
+        radius = 24.0
+
+        # Soft drop shadow — drawn manually so we never depend on
+        # QGraphicsDropShadowEffect, which on Windows triggers
+        # "UpdateLayeredWindowIndirect failed" with translucent windows.
+        self._draw_shadow(painter, rect, radius)
 
         # Card background — gradient from elevated to slightly bluer.
         path = QPainterPath()
@@ -186,23 +214,15 @@ class SplashScreen(QWidget):
         painter.fillPath(path, gradient)
 
         # Subtle inner border.
-        painter.setPen(QPen(QColor(255, 255, 255, 25), 1))
+        painter.setPen(QPen(QColor(255, 255, 255, 28), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
 
-        # Spinner: 8 dots orbiting in the upper portion.
+        # Windows 11-style progress ring centred near the top of the card.
         cx = rect.center().x()
-        cy = rect.top() + 84
-        ring_r = 26.0
-        dot_r = 4.5
-        for i in range(8):
-            phase = (self._angle + i * 45.0) * math.pi / 180.0
-            x = cx + ring_r * math.cos(phase)
-            y = cy + ring_r * math.sin(phase)
-            alpha = 60 + int(195 * (i / 7.0))
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(10, 132, 255, alpha))
-            painter.drawEllipse(QPointF(x, y), dot_r, dot_r)
+        cy = rect.top() + 80
+        ring_r = 22.0
+        self._draw_progress_ring(painter, QPointF(cx, cy), ring_r)
 
         # Title.
         painter.setPen(QColor("#f2f2f7"))
@@ -216,14 +236,75 @@ class SplashScreen(QWidget):
             "Tapo Viewer",
         )
 
-        # Status / progress text.
+        # Stage label (e.g. "ONVIF aranıyor"). Single line, keeps the user
+        # informed about what the splash is currently doing.
+        painter.setPen(QColor("#c7c7cc"))
+        stage_font = QFont(painter.font())
+        stage_font.setPointSize(12)
+        stage_font.setWeight(QFont.Weight.Medium)
+        painter.setFont(stage_font)
+        painter.drawText(
+            QRectF(rect.left(), cy + 70, rect.width(), 22),
+            Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
+            self._stage,
+        )
+
+        # Progress / status text underneath.
         painter.setPen(QColor("#9a9aa0"))
         sub_font = QFont(painter.font())
-        sub_font.setPointSize(11)
+        sub_font.setPointSize(10)
         sub_font.setWeight(QFont.Weight.Normal)
         painter.setFont(sub_font)
         painter.drawText(
-            QRectF(rect.left(), cy + 72, rect.width(), 24),
+            QRectF(rect.left(), cy + 94, rect.width(), 22),
             Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter,
             self._message,
         )
+
+    def _draw_shadow(self, painter: QPainter, rect: QRectF,
+                      radius: float) -> None:
+        """Paint a soft drop shadow under ``rect`` using a few stacked
+        outlines. Cheap, dependency-free, and fits inside the widget."""
+        painter.save()
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for i, alpha in enumerate((10, 18, 32, 60)):
+            spread = (4 - i) * 3 + 2
+            shadow_rect = rect.adjusted(-spread, -spread + 4,
+                                         spread, spread + 4)
+            painter.setPen(QPen(QColor(0, 0, 0, alpha), spread * 2))
+            painter.drawRoundedRect(shadow_rect, radius + spread,
+                                     radius + spread)
+        painter.restore()
+
+    def _draw_progress_ring(self, painter: QPainter, center: QPointF,
+                             radius: float) -> None:
+        """Windows 11 progress ring: a faint full track with a single
+        accent-coloured arc sweeping around it."""
+        track_rect = QRectF(center.x() - radius, center.y() - radius,
+                             radius * 2, radius * 2)
+        track_pen = QPen(QColor(255, 255, 255, 32))
+        track_pen.setWidthF(3.5)
+        track_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(track_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawEllipse(track_rect)
+
+        # Sweep arc: 110° wide, accent colour, rotating.
+        arc_pen = QPen(QColor("#0a84ff"))
+        arc_pen.setWidthF(3.5)
+        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(arc_pen)
+        # Qt arcs use 1/16 degree units; angles increase counter-clockwise
+        # so we negate to spin clockwise like the Win11 ring.
+        start_angle = int((-self._angle) * 16)
+        span_angle = int(-110 * 16)
+        painter.drawArc(track_rect, start_angle, span_angle)
+
+        # A small leading dot at the head of the arc adds the trademark
+        # Win11 highlight.
+        head_phase = math.radians(-self._angle)
+        head = QPointF(center.x() + radius * math.cos(head_phase),
+                        center.y() + radius * math.sin(head_phase))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor("#0a84ff"))
+        painter.drawEllipse(head, 2.6, 2.6)

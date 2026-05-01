@@ -10,9 +10,11 @@ from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -154,7 +156,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Ayarlar")
         self.setModal(True)
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(440)
 
         title = QLabel("Görüntüleme Ayarları")
         title.setObjectName("TitleLabel")
@@ -182,6 +184,25 @@ class SettingsDialog(QDialog):
         self.overlay_check = QCheckBox("Kamera adı ve durum rozetini göster")
         self.overlay_check.setChecked(settings.show_overlay)
 
+        # Diagnostics section: file logging + IP rediscovery.
+        self.logging_check = QCheckBox("Log kayıtlarını dosyaya yaz")
+        self.logging_check.setToolTip(
+            "Hata ayıklama için olayları %APPDATA%/TapoViewer/logs altına yazar."
+        )
+        self.logging_check.setChecked(bool(settings.logging_enabled))
+
+        self.log_level_combo = QComboBox()
+        for level in ("DEBUG", "INFO", "WARNING", "ERROR"):
+            self.log_level_combo.addItem(level)
+        idx = self.log_level_combo.findText(settings.log_level)
+        if idx >= 0:
+            self.log_level_combo.setCurrentIndex(idx)
+
+        self.rediscover_check = QCheckBox(
+            "IP değişirse MAC adresine göre yerel ağı tarayarak yeniden bul"
+        )
+        self.rediscover_check.setChecked(bool(settings.ip_rediscovery_enabled))
+
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setHorizontalSpacing(14)
@@ -191,6 +212,17 @@ class SettingsDialog(QDialog):
         form.addRow("Yeniden bağlanma", self.reconnect_spin)
         form.addRow("HW hızlandırma", self.hw_combo)
         form.addRow("", self.overlay_check)
+
+        diag_title = QLabel("Tanılama")
+        diag_title.setObjectName("SectionLabel")
+
+        diag_form = QFormLayout()
+        diag_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        diag_form.setHorizontalSpacing(14)
+        diag_form.setVerticalSpacing(10)
+        diag_form.addRow("", self.logging_check)
+        diag_form.addRow("Log seviyesi", self.log_level_combo)
+        diag_form.addRow("", self.rediscover_check)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
@@ -207,8 +239,13 @@ class SettingsDialog(QDialog):
         layout.setSpacing(12)
         layout.addWidget(title)
         layout.addLayout(form)
+        layout.addWidget(diag_title)
+        layout.addLayout(diag_form)
         layout.addStretch(1)
         layout.addWidget(buttons)
+
+        self.logging_check.toggled.connect(self.log_level_combo.setEnabled)
+        self.log_level_combo.setEnabled(self.logging_check.isChecked())
 
     def result_settings(self) -> Settings:
         return Settings(
@@ -217,4 +254,83 @@ class SettingsDialog(QDialog):
             hw_accel=self.hw_combo.currentText(),
             reconnect_delay=float(self.reconnect_spin.value()),
             show_overlay=self.overlay_check.isChecked(),
+            logging_enabled=self.logging_check.isChecked(),
+            log_level=self.log_level_combo.currentText(),
+            ip_rediscovery_enabled=self.rediscover_check.isChecked(),
         )
+
+
+class DeviceInfoDialog(QDialog):
+    """Read-only summary of a camera's connection details."""
+
+    def __init__(self, parent: Optional[QWidget], camera: Camera,
+                 status: str = "—", mac: str = "",
+                 last_seen: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Cihaz Bilgisi")
+        self.setModal(True)
+        self.setMinimumWidth(420)
+
+        title = QLabel(camera.name or camera.host or "Kamera")
+        title.setObjectName("TitleLabel")
+
+        subtitle = QLabel(
+            "Bu kameranın yapılandırma ve bağlantı bilgileri."
+        )
+        subtitle.setObjectName("MutedLabel")
+        subtitle.setWordWrap(True)
+
+        sep = QFrame()
+        sep.setObjectName("Separator")
+        sep.setFrameShape(QFrame.Shape.HLine)
+
+        rtsp_url = camera.rtsp_url
+        # Mask the password in RTSP URLs so they're safe to copy.
+        masked_url = rtsp_url
+        if camera.password and not camera.use_custom_url:
+            masked_url = rtsp_url.replace(camera.password, "•" * len(camera.password))
+
+        rows: list[tuple[str, str]] = [
+            ("Ad", camera.name or "—"),
+            ("Host / IP", camera.host or "—"),
+            ("Kullanıcı", camera.username or "—"),
+            ("RTSP portu", str(camera.rtsp_port)),
+            ("ONVIF portu", str(camera.onvif_port)),
+            ("Akış", camera.stream),
+            ("Özel URL", "Evet" if camera.use_custom_url else "Hayır"),
+            ("Ses", "Açık" if camera.audio_enabled else "Kapalı"),
+            ("MAC adresi", mac or "—"),
+            ("Son görülen IP", last_seen or "—"),
+            ("Durum", status or "—"),
+            ("RTSP", masked_url or "—"),
+        ]
+
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+        for label, value in rows:
+            value_label = QLabel(value)
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse
+            )
+            value_label.setWordWrap(True)
+            form.addRow(label, value_label)
+
+        close_btn = QPushButton("Kapat")
+        close_btn.setObjectName("PrimaryButton")
+        close_btn.clicked.connect(self.accept)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        button_row.addWidget(close_btn)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(sep)
+        layout.addLayout(form)
+        layout.addStretch(1)
+        layout.addLayout(button_row)

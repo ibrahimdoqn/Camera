@@ -44,6 +44,7 @@ class CameraTile(QWidget):
     double_clicked = pyqtSignal(str)  # double click → toggle maximize
     first_frame = pyqtSignal(str)     # camera_id, fired once when first
                                       # frame arrives (used by the splash)
+    status_changed = pyqtSignal(str, str)  # camera_id, status
 
     def __init__(self, camera: Camera, target_fps: int = 20, reconnect_delay: float = 3.0,
                  show_overlay: bool = True, parent: Optional[QWidget] = None) -> None:
@@ -270,7 +271,9 @@ class CameraTile(QWidget):
         self.update()
 
     def _on_status(self, status: str) -> None:
-        self._status = status
+        if self._status != status:
+            self._status = status
+            self.status_changed.emit(self.camera.id, status)
         self.update()
 
     def _on_error(self, message: str) -> None:
@@ -373,37 +376,51 @@ class CameraTile(QWidget):
 
     def _draw_overlay(self, painter: QPainter, rect: QRectF) -> None:
         # Top-left: camera name with status dot. Pull the chip in past the
-        # rounded corner radius so it never sits on the curve.
-        margin = 18
+        # rounded corner radius so it never sits on the curve. When the tile
+        # is selected (blue border), the chip is enlarged and given a subtle
+        # white halo so the name and status dot stay clearly legible.
+        margin = 18 if not self._selected else 14
         font = QFont(painter.font())
-        font.setPointSize(11)
-        font.setWeight(QFont.Weight.DemiBold)
+        font.setPointSize(13 if self._selected else 12)
+        font.setWeight(QFont.Weight.Bold if self._selected else QFont.Weight.DemiBold)
         painter.setFont(font)
 
         name = self.camera.name or self.camera.host or "Kamera"
         text_w = painter.fontMetrics().horizontalAdvance(name)
-        chip_h = 32
-        dot_d = 10
+        chip_h = 38 if self._selected else 34
+        dot_d = 14 if self._selected else 12
         # left padding | dot | gap | text | right padding
-        chip_w = 14 + dot_d + 8 + text_w + 14
+        chip_w = 16 + dot_d + 10 + text_w + 16
         max_w = max(60.0, rect.width() - 2 * margin)
         chip_w = min(chip_w, max_w)
         chip = QRectF(rect.left() + margin, rect.top() + margin, chip_w, chip_h)
 
-        # Solid, near-opaque pill so the white text stays legible regardless of
-        # the underlying frame and the selection (blue) border.
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(0, 0, 0, 235))
+        # Solid pill so the white text stays legible regardless of the
+        # underlying frame. When selected, a subtle white halo keeps the
+        # chip distinct from the blue border behind it.
+        if self._selected:
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 245 if self._selected else 230))
         painter.drawRoundedRect(chip, chip_h / 2, chip_h / 2)
 
         dot_color = QColor(STATUS_COLORS.get(self._status, "#9a9aa0"))
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(dot_color)
-        dot_cx = chip.left() + 14 + dot_d / 2
+        dot_cx = chip.left() + 16 + dot_d / 2
         painter.drawEllipse(QPointF(dot_cx, chip.center().y()), dot_d / 2, dot_d / 2)
+        # White halo around the dot when selected so it stays vivid even on
+        # top of the blue selection border.
+        if self._selected:
+            painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QPointF(dot_cx, chip.center().y()),
+                                dot_d / 2 + 1.5, dot_d / 2 + 1.5)
 
         painter.setPen(QColor("#ffffff"))
-        text_left = dot_cx + dot_d / 2 + 8
-        text_right = chip.right() - 14
+        text_left = dot_cx + dot_d / 2 + 10
+        text_right = chip.right() - 16
         painter.drawText(
             QRectF(text_left, chip.top(), max(0.0, text_right - text_left), chip.height()),
             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
@@ -413,10 +430,13 @@ class CameraTile(QWidget):
         # Top-right: zoom indicator if zoomed.
         if self._zoom > 1.01:
             zoom_text = f"{self._zoom:.1f}×"
-            tw = painter.fontMetrics().horizontalAdvance(zoom_text) + 20
+            tw = painter.fontMetrics().horizontalAdvance(zoom_text) + 22
             zchip = QRectF(rect.right() - margin - tw, rect.top() + margin, tw, chip_h)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(0, 0, 0, 235))
+            if self._selected:
+                painter.setPen(QPen(QColor(255, 255, 255, 220), 1.5))
+            else:
+                painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(0, 0, 0, 245 if self._selected else 230))
             painter.drawRoundedRect(zchip, chip_h / 2, chip_h / 2)
             painter.setPen(QColor("#ffffff"))
             painter.drawText(zchip, Qt.AlignmentFlag.AlignCenter, zoom_text)

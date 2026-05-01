@@ -1,4 +1,11 @@
-"""Sidebar camera list with drag-and-drop reordering and per-row mute toggle."""
+"""Sidebar camera list with drag-and-drop reordering, mute toggle, and a
+3-dot overflow menu (info / edit / remove).
+
+The row paints its own rounded card, hover state and selection so the
+underlying QListWidget items stay completely unstyled. That lets the
+drag pixmap reuse the rendered card directly (rounded corners and all),
+and gives the sidebar a tight, modern look without nested widgets.
+"""
 from __future__ import annotations
 
 from typing import Optional
@@ -7,12 +14,22 @@ from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
     QPropertyAnimation,
+    QRect,
+    QRectF,
     QSize,
     QTimer,
     Qt,
     pyqtSignal,
 )
-from PyQt6.QtGui import QDrag
+from PyQt6.QtGui import (
+    QColor,
+    QDrag,
+    QPainter,
+    QPainterPath,
+    QPaintEvent,
+    QPen,
+    QPixmap,
+)
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QGraphicsOpacityEffect,
@@ -20,6 +37,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -29,11 +47,12 @@ from PyQt6.QtWidgets import (
 from .config import Camera
 
 
-ROW_HEIGHT = 56
+ROW_HEIGHT = 60
 
 
 class CameraRow(QWidget):
-    """A modern card-style row: status dot, name + host, and mute toggle.
+    """A modern card-style row: status dot, camera name + status caption,
+    mute toggle, and a 3-dot overflow menu.
 
     The row paints its own selection / hover background via QSS dynamic
     properties, so the underlying QListWidget items can stay unstyled.
@@ -41,7 +60,8 @@ class CameraRow(QWidget):
     so selection and drag-and-drop continue to work.
     """
 
-    mute_toggled = pyqtSignal(str, bool)  # camera_id, audio_enabled
+    mute_toggled = pyqtSignal(str, bool)            # camera_id, audio_enabled
+    menu_requested = pyqtSignal(str, QPoint)        # camera_id, global pos
 
     def __init__(self, camera: Camera, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -54,7 +74,7 @@ class CameraRow(QWidget):
 
         self._dot = QLabel()
         self._dot.setObjectName("CameraDot")
-        self._dot.setFixedSize(14, 14)
+        self._dot.setFixedSize(12, 12)
         self._dot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
         self._name = QLabel()
@@ -75,18 +95,27 @@ class CameraRow(QWidget):
 
         self._mute_btn = QPushButton()
         self._mute_btn.setObjectName("MuteButton")
-        self._mute_btn.setFixedSize(30, 30)
+        self._mute_btn.setFixedSize(28, 28)
         self._mute_btn.setCheckable(True)
         self._mute_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._mute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._mute_btn.clicked.connect(self._on_mute_clicked)
 
+        self._menu_btn = OverflowButton()
+        self._menu_btn.setObjectName("OverflowButton")
+        self._menu_btn.setFixedSize(28, 28)
+        self._menu_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._menu_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._menu_btn.setToolTip("Daha fazla")
+        self._menu_btn.clicked.connect(self._on_menu_clicked)
+
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(10, 8, 8, 8)
+        layout.setContentsMargins(12, 8, 8, 8)
         layout.setSpacing(10)
         layout.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_col, 1)
         layout.addWidget(self._mute_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self._menu_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         self._apply_camera(camera)
 
@@ -106,11 +135,51 @@ class CameraRow(QWidget):
     def camera_id(self) -> str:
         return self._cam_id
 
+    # -- rendering of a self-contained, rounded drag pixmap --
+
+    def render_drag_pixmap(self) -> QPixmap:
+        """Return a rounded, drop-shadowed copy of this row for use as a
+        drag pixmap. ``QWidget.grab()`` ignores the QSS ``border-radius``
+        because Qt always rasterises into a rectangular buffer, leaving an
+        ugly square preview during drag."""
+        dpr = self.devicePixelRatioF() or 1.0
+        size = self.size()
+        pix = QPixmap(int(size.width() * dpr), int(size.height() * dpr))
+        pix.setDevicePixelRatio(dpr)
+        pix.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        radius = 12.0
+        rect = QRectF(0, 0, size.width(), size.height()).adjusted(0.5, 0.5, -0.5, -0.5)
+        # Solid card background so the dragged item is opaque against the
+        # cursor and reads cleanly even over busy video frames.
+        path = QPainterPath()
+        path.addRoundedRect(rect, radius, radius)
+        # Match the elevated background so the drag preview blends with the
+        # sidebar style rather than introducing a foreign colour.
+        painter.fillPath(path, QColor("#3a3a3c"))
+        painter.setPen(QPen(QColor(255, 255, 255, 30), 1))
+        painter.drawPath(path)
+        # Render the live row into the rounded canvas.
+        painter.setClipPath(path)
+        # render() picks up the styled QSS contents.
+        self.render(painter, QPoint(0, 0))
+        painter.end()
+        return pix
+
     # -- internals --
 
     def _apply_camera(self, camera: Camera) -> None:
         self._name.setText(camera.name or "Kamera")
-        self._sub.setText(camera.host or "—")
+        # Modern lists never bury the IP up front. Show a soft caption that
+        # describes the device class instead — the IP is one click away in
+        # the overflow menu (Bilgi / Info).
+        if camera.use_custom_url and camera.custom_url:
+            self._sub.setText("Özel RTSP")
+        elif camera.host:
+            self._sub.setText("IP kamera")
+        else:
+            self._sub.setText("Yapılandırılmamış")
         self._set_mute_visual(camera.audio_enabled)
 
     def _set_mute_visual(self, audio_on: bool) -> None:
@@ -125,6 +194,34 @@ class CameraRow(QWidget):
         self._set_mute_visual(new_state)
         self.mute_toggled.emit(self._cam_id, new_state)
 
+    def _on_menu_clicked(self) -> None:
+        # Open the menu just under the button so it visually anchors there.
+        anchor = self._menu_btn.mapToGlobal(QPoint(0, self._menu_btn.height()))
+        self.menu_requested.emit(self._cam_id, anchor)
+
+
+class OverflowButton(QPushButton):
+    """A 3-dot vertical "more" button. Painted instead of using a glyph so
+    the dots are perfectly centred regardless of the underlying font."""
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+        spacing = 5.0
+        radius = 1.6
+        color = QColor("#f2f2f7") if self.underMouse() else QColor("#c7c7cc")
+        if not self.isEnabled():
+            color = QColor("#6a6a70")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        for dy in (-spacing, 0.0, spacing):
+            painter.drawEllipse(QRectF(cx - radius, cy - radius + dy,
+                                        radius * 2, radius * 2))
+
 
 class CameraList(QListWidget):
     """Drag-and-drop sortable list of camera rows."""
@@ -133,6 +230,7 @@ class CameraList(QListWidget):
     mute_toggled = pyqtSignal(str, bool)
     selection_changed = pyqtSignal(str)           # current camera_id ("" if none)
     item_double_clicked_id = pyqtSignal(str)      # camera_id
+    overflow_menu_requested = pyqtSignal(str, QPoint)  # camera_id, global pos
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -151,14 +249,19 @@ class CameraList(QListWidget):
         self._row_anims: list[QPropertyAnimation] = []
 
     def populate(self, cameras: list[Camera], selected_id: Optional[str] = None) -> None:
+        # ``clear()`` deletes the existing CameraRow widgets, which in turn
+        # destroys any QPropertyAnimation we parented to them. Drop the
+        # stale Python proxies first so subsequent ``_animate_settle`` calls
+        # don't poke at deleted C++ objects.
+        self._row_anims.clear()
         self.blockSignals(True)
         self.clear()
         for cam in cameras:
             item = QListWidgetItem()
             item.setData(Qt.ItemDataRole.UserRole, cam.id)
             row = CameraRow(cam)
-            row.setToolTip(cam.rtsp_url)
             row.mute_toggled.connect(self.mute_toggled)
+            row.menu_requested.connect(self.overflow_menu_requested)
             item.setSizeHint(QSize(180, ROW_HEIGHT + 4))
             self.addItem(item)
             self.setItemWidget(item, row)
@@ -198,17 +301,32 @@ class CameraList(QListWidget):
         ]
 
     def _on_rows_moved(self, *_args) -> None:
-        """Fire ``order_changed`` and play a soft settle animation so the
-        moved row lands smoothly rather than snapping into place."""
-        self.order_changed.emit(self._ordered_ids())
-        # Defer to the next event loop tick so the list view has finished
-        # repositioning the widget before we animate it.
-        QTimer.singleShot(0, self._animate_settle)
+        """Fire ``order_changed`` after the drag has fully unwound.
+
+        Emitting synchronously from inside the model's own ``rowsMoved``
+        callback leaves Qt's drag-and-drop machinery half-initialised, so
+        the *next* drag locks the UI up. Deferring the emit (and the
+        settle animation) to the next event-loop tick avoids the
+        re-entrancy and lets every subsequent drag work cleanly."""
+        ids = self._ordered_ids()
+        QTimer.singleShot(0, lambda i=ids: self._finish_drop(i))
+
+    def _finish_drop(self, ids: list[str]) -> None:
+        self.order_changed.emit(ids)
+        self._animate_settle()
 
     def _animate_settle(self) -> None:
-        # Drop stale animations.
-        self._row_anims = [a for a in self._row_anims
-                           if a.state() == QPropertyAnimation.State.Running]
+        # Drop stale animation proxies; some may point at deleted C++
+        # objects (their parent widget was destroyed by ``populate()``).
+        live: list[QPropertyAnimation] = []
+        for anim in self._row_anims:
+            try:
+                if anim.state() == QPropertyAnimation.State.Running:
+                    live.append(anim)
+            except RuntimeError:
+                # underlying QObject already deleted — skip.
+                continue
+        self._row_anims = live
         for i in range(self.count()):
             item = self.item(i)
             widget = self.itemWidget(item)
@@ -227,13 +345,15 @@ class CameraList(QListWidget):
             self._row_anims.append(anim)
 
     def startDrag(self, supportedActions) -> None:  # noqa: N802
-        """Use the full row widget as the drag pixmap so the camera
-        visibly travels with the cursor (Apple-style)."""
+        """Use a rounded snapshot of the row as the drag pixmap so the
+        camera visibly travels with the cursor (Apple-style) — and the
+        preview matches the row's QSS rounded corners instead of the
+        ``QWidget.grab()`` rectangle."""
         item = self.currentItem()
         if item is None:
             return super().startDrag(supportedActions)
         widget = self.itemWidget(item)
-        if widget is None:
+        if not isinstance(widget, CameraRow):
             return super().startDrag(supportedActions)
         try:
             indexes = [self.indexFromItem(item)]
@@ -242,7 +362,7 @@ class CameraList(QListWidget):
             return super().startDrag(supportedActions)
         if mime is None:
             return super().startDrag(supportedActions)
-        pixmap = widget.grab()
+        pixmap = widget.render_drag_pixmap()
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.setPixmap(pixmap)

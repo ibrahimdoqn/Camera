@@ -105,9 +105,9 @@ QPushButton#ToggleButton {{
     border: 1px solid {COLORS['border']};
     border-radius: 10px;
     color: {COLORS['text']};
-    font-size: 24px;
-    font-weight: 900;
-    padding: 0 0 3px 0;
+    /* Chevron is painted by ChevronToggleButton, not by text. No padding
+       hacks — keep the box pristine so the painted glyph stays centred. */
+    padding: 0;
 }}
 QPushButton#ToggleButton:hover {{
     background-color: {COLORS['accent']};
@@ -121,7 +121,7 @@ QPushButton#ToggleButton:pressed {{
 QPushButton#MuteButton {{
     background-color: transparent;
     border: none;
-    border-radius: 6px;
+    border-radius: 8px;
     padding: 0;
     font-size: 14px;
 }}
@@ -130,6 +130,16 @@ QPushButton#MuteButton:hover {{
 }}
 QPushButton#MuteButton:checked {{
     color: {COLORS['accent']};
+}}
+
+QPushButton#OverflowButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+}}
+QPushButton#OverflowButton:hover {{
+    background-color: {COLORS['bg_hover']};
 }}
 
 /* Inside a selected (blue) row, the mute toggle & dot must remain visible. */
@@ -143,6 +153,12 @@ QWidget#CameraRow[selected="true"] QPushButton#MuteButton:hover {{
 QWidget#CameraRow[selected="true"] QPushButton#MuteButton:checked {{
     color: white;
     background-color: rgba(255, 255, 255, 0.28);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#OverflowButton {{
+    background-color: rgba(255, 255, 255, 0.18);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#OverflowButton:hover {{
+    background-color: rgba(255, 255, 255, 0.30);
 }}
 
 QPushButton#PtzButton {{
@@ -198,17 +214,21 @@ QListWidget#CameraList {{
 }}
 
 QWidget#CameraRow {{
-    background-color: transparent;
-    border-radius: 10px;
+    background-color: {COLORS['bg']};
+    border-radius: 12px;
+    border: 1px solid transparent;
 }}
 QWidget#CameraRow:hover {{
     background-color: {COLORS['bg_hover']};
+    border: 1px solid {COLORS['border']};
 }}
 QWidget#CameraRow[selected="true"] {{
     background-color: {COLORS['accent']};
+    border: 1px solid {COLORS['accent']};
 }}
 QWidget#CameraRow[selected="true"]:hover {{
     background-color: {COLORS['accent_hover']};
+    border: 1px solid {COLORS['accent_hover']};
 }}
 
 QLabel#CameraDot {{

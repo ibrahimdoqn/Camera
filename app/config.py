@@ -32,6 +32,11 @@ class Camera:
     custom_url: str = ""
     use_custom_url: bool = False
     audio_enabled: bool = False  # default: all cameras muted
+    # Captured the first time the camera is reached over the LAN; used by
+    # the MAC-based IP rediscovery scan when the configured host stops
+    # responding.
+    mac_address: str = ""
+    last_seen_host: str = ""
 
     @property
     def rtsp_url(self) -> str:
@@ -56,6 +61,11 @@ class Settings:
     reconnect_delay: float = 3.0
     show_overlay: bool = True
     sidebar_collapsed: bool = False
+    # File-based diagnostics. Logs land in %APPDATA%/TapoViewer/logs.
+    logging_enabled: bool = False
+    log_level: str = "INFO"
+    # Rediscover a camera by MAC if its configured IP stops responding.
+    ip_rediscovery_enabled: bool = True
 
 
 @dataclass

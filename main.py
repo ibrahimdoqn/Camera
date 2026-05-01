@@ -41,10 +41,17 @@ def main() -> int:
     # first frame (or a short timeout elapses).
     cfg = load_config()
     splash = SplashScreen(total_cameras=len(cfg.cameras))
+    splash.set_stage("Yapılandırma okunuyor")
     splash.start()
     app.processEvents()
 
+    splash.set_stage("Pencere hazırlanıyor")
+    app.processEvents()
     window = MainWindow(preloaded_config=cfg, splash=splash)
+    if cfg.cameras:
+        splash.set_stage("Kameralara bağlanılıyor")
+    else:
+        splash.set_stage("Hazırlanıyor")
     splash.finished.connect(window.show)
     return app.exec()
 

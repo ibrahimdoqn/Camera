@@ -1,8 +1,17 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QSize, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QKeySequence, QShortcut
+from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QShortcut,
+)
 from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -18,10 +27,68 @@ from PyQt6.QtWidgets import (
 from .camera_grid import CameraGrid
 from .camera_list import CameraList
 from .config import AppConfig, Camera, load_config, save_config
-from .dialogs import CameraDialog, SettingsDialog
+from .dialogs import CameraDialog, DeviceInfoDialog, SettingsDialog
+from .logger import configure_logging, get_logger
+from .network_scan import (
+    IpRediscoverer,
+    RediscoveryResult,
+    fingerprint_camera_mac,
+    schedule_ip_rediscovery,
+)
 from .onvif_ptz import PtzManager
 from .ptz_panel import PtzPanel
 from .resource_monitor import ResourceMonitor
+
+
+_log = get_logger("main_window")
+
+
+class ChevronToggleButton(QPushButton):
+    """Sidebar toggle button that paints its own chevron, perfectly centered.
+
+    Relying on a unicode glyph for the arrow makes vertical centering very
+    font-dependent — the angle quotation marks shift visibly in many fonts.
+    Drawing the chevron with QPainter keeps it pixel-centered regardless.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._collapsed: bool = False
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        if self._collapsed == collapsed:
+            return
+        self._collapsed = collapsed
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        # Let the stylesheet paint the background / border / hover state.
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+        size = 7.0
+        # When expanded, point left ("‹"); when collapsed, point right ("›").
+        if self._collapsed:
+            tip = QPointF(cx + size * 0.55, cy)
+            top = QPointF(cx - size * 0.55, cy - size)
+            bot = QPointF(cx - size * 0.55, cy + size)
+        else:
+            tip = QPointF(cx - size * 0.55, cy)
+            top = QPointF(cx + size * 0.55, cy - size)
+            bot = QPointF(cx + size * 0.55, cy + size)
+        pen = QPen(self.palette().windowText().color())
+        # Pick a color that contrasts both the dark and accent button states.
+        color = QColor("#ffffff") if self.underMouse() else QColor("#f2f2f7")
+        pen.setColor(color)
+        pen.setWidthF(2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(top, tip)
+        painter.drawLine(tip, bot)
 
 
 SIDEBAR_WIDTH = 280
@@ -32,6 +99,11 @@ TOGGLE_BUTTON_SIZE = 40
 
 
 class MainWindow(QMainWindow):
+    # Internal signal used to marshal results from the daemon MAC
+    # fingerprint thread back to the UI thread (Qt routes signals across
+    # threads via a queued connection by default).
+    _mac_fingerprinted = pyqtSignal(str, str, str)  # camera_id, mac, host
+
     def __init__(self, preloaded_config: AppConfig | None = None,
                  splash=None) -> None:
         super().__init__()
@@ -43,6 +115,26 @@ class MainWindow(QMainWindow):
         self._collapsed: bool = bool(self._config.settings.sidebar_collapsed)
         self._splash = splash
 
+        # Apply file logging straight away so the rest of the window — and
+        # any background workers it starts — emit through the configured
+        # handler.
+        configure_logging(
+            enabled=self._config.settings.logging_enabled,
+            level=self._config.settings.log_level,
+        )
+        _log.info("Tapo Viewer starting (cameras=%d)", len(self._config.cameras))
+
+        # In-flight rediscovery jobs, keyed by camera id, so we don't kick
+        # off two scans for the same camera at the same time.
+        self._rediscoverers: dict[str, IpRediscoverer] = {}
+        # Tile status the last time we saw it, so we only react when a
+        # camera transitions online → offline.
+        self._last_tile_status: dict[str, str] = {}
+        # Fingerprint workers in progress, by camera id, so we don't spawn
+        # duplicates while one is still running.
+        self._mac_workers_active: set[str] = set()
+        self._mac_fingerprinted.connect(self._on_mac_fingerprinted)
+
         # ---- Sidebar shell ----
         self.sidebar = QWidget()
         self.sidebar.setObjectName("Sidebar")
@@ -51,7 +143,7 @@ class MainWindow(QMainWindow):
         )
 
         # Header row: title + toggle button.
-        self.toggle_btn = QPushButton()
+        self.toggle_btn = ChevronToggleButton()
         self.toggle_btn.setObjectName("ToggleButton")
         self.toggle_btn.setFixedSize(TOGGLE_BUTTON_SIZE, TOGGLE_BUTTON_SIZE)
         self.toggle_btn.setToolTip("Kenar çubuğunu daralt/genişlet")
@@ -78,6 +170,7 @@ class MainWindow(QMainWindow):
         self.list_widget.customContextMenuRequested.connect(self._on_list_context_menu)
         self.list_widget.order_changed.connect(self._on_order_changed)
         self.list_widget.mute_toggled.connect(self._on_mute_toggled)
+        self.list_widget.overflow_menu_requested.connect(self._on_overflow_menu)
 
         self.add_btn = QPushButton("+ Kamera Ekle")
         self.add_btn.setObjectName("PrimaryButton")
@@ -123,6 +216,7 @@ class MainWindow(QMainWindow):
         self.grid = CameraGrid(settings=self._config.settings)
         self.grid.selection_changed.connect(self._on_grid_selection_changed)
         self.grid.tile_selected.connect(self._on_tile_selected)
+        self.grid.tile_status_changed.connect(self._on_tile_status_changed)
         if self._splash is not None:
             self.grid.tile_first_frame.connect(self._splash.mark_camera_ready)
 
@@ -188,8 +282,8 @@ class MainWindow(QMainWindow):
         )
         self.body_widget.setVisible(not self._collapsed)
         self.title_label.setVisible(not self._collapsed)
-        # Bold, large arrows so the toggle is unmistakable when collapsed.
-        self.toggle_btn.setText("›" if self._collapsed else "‹")
+        # Custom-painted chevron stays perfectly centred regardless of font.
+        self.toggle_btn.set_collapsed(self._collapsed)
         self.toggle_btn.setToolTip(
             "Kenar çubuğunu genişlet" if self._collapsed else "Kenar çubuğunu daralt"
         )
@@ -228,16 +322,69 @@ class MainWindow(QMainWindow):
         if item is None:
             return
         self.list_widget.setCurrentItem(item)
+        self._open_camera_menu(self.list_widget.viewport().mapToGlobal(pos))
 
+    def _on_overflow_menu(self, camera_id: str, global_pos: QPoint) -> None:
+        if camera_id and self.list_widget.selected_camera_id() != camera_id:
+            self.list_widget.select_by_id(camera_id)
+        self._open_camera_menu(global_pos)
+
+    def _open_camera_menu(self, global_pos: QPoint) -> None:
+        cam = self._selected_camera()
+        if cam is None:
+            return
         menu = QMenu(self)
+        info_act = QAction("Bilgi", self)
+        info_act.triggered.connect(self._on_show_device_info)
         edit_act = QAction("Düzenle", self)
         edit_act.triggered.connect(self._on_edit_camera)
+        rediscover_act = QAction("Yerel ağda yeniden bul", self)
+        rediscover_act.setEnabled(bool(cam.mac_address)
+                                  and self._config.settings.ip_rediscovery_enabled)
+        rediscover_act.triggered.connect(self._on_manual_rediscover)
         remove_act = QAction("Kaldır", self)
         remove_act.triggered.connect(self._on_remove_camera)
+        menu.addAction(info_act)
         menu.addAction(edit_act)
+        menu.addAction(rediscover_act)
         menu.addSeparator()
         menu.addAction(remove_act)
-        menu.exec(self.list_widget.viewport().mapToGlobal(pos))
+        menu.exec(global_pos)
+
+    def _on_show_device_info(self) -> None:
+        cam = self._selected_camera()
+        if cam is None:
+            return
+        status = self._last_tile_status.get(cam.id, "—")
+        dlg = DeviceInfoDialog(self, cam,
+                               status=self._humanize_status(status),
+                               mac=cam.mac_address,
+                               last_seen=cam.last_seen_host)
+        dlg.exec()
+
+    @staticmethod
+    def _humanize_status(status: str) -> str:
+        return {
+            "connecting": "Bağlanıyor",
+            "online":     "Bağlı",
+            "offline":    "Bağlantı yok",
+            "error":      "Hata",
+            "idle":       "Bekleniyor",
+        }.get(status, status or "—")
+
+    def _on_manual_rediscover(self) -> None:
+        cam = self._selected_camera()
+        if cam is None:
+            return
+        if not cam.mac_address:
+            QMessageBox.information(
+                self,
+                "Yeniden bul",
+                "Bu kamera için MAC adresi henüz öğrenilmemiş. "
+                "Kamera bir kez bağlandıktan sonra yeniden deneyin.",
+            )
+            return
+        self._kick_rediscovery(cam, reason="manual")
 
     def _on_order_changed(self, ordered_ids: list) -> None:
         by_id = {c.id: c for c in self._config.cameras}
@@ -248,6 +395,12 @@ class MainWindow(QMainWindow):
                 new_order.append(c)
         self._config.cameras = new_order
         self._save()
+        # Rebuild the sidebar list. QListWidget's InternalMove drop destroys
+        # the original QListWidgetItem and creates a new one at the
+        # destination, which orphans the CameraRow we attached via
+        # setItemWidget(). Without a fresh populate() the second drag hits
+        # those dangling references and the UI freezes.
+        self._refresh_camera_list(selected_id=self.list_widget.selected_camera_id())
         self.grid.set_cameras(self._config.cameras)
         self.ptz_manager.sync(self._config.cameras)
         self._update_status()
@@ -331,7 +484,149 @@ class MainWindow(QMainWindow):
             self._save()
             # FPS / overlay / columns all apply live without restarting workers.
             self.grid.apply_settings(new_settings)
+            configure_logging(
+                enabled=new_settings.logging_enabled,
+                level=new_settings.log_level,
+            )
+            _log.info("Settings updated: logging=%s level=%s rediscover=%s",
+                      new_settings.logging_enabled,
+                      new_settings.log_level,
+                      new_settings.ip_rediscovery_enabled)
             self._update_status()
+
+    def _on_tile_status_changed(self, camera_id: str, status: str) -> None:
+        prev = self._last_tile_status.get(camera_id)
+        self._last_tile_status[camera_id] = status
+        if prev == status:
+            return
+        cam = self._camera_by_id(camera_id)
+        if cam is None:
+            return
+        if status == "online":
+            # First successful connect — capture the MAC for future
+            # rediscovery, but only if we don't already have one for this
+            # configured host.
+            self._capture_mac(cam)
+        elif status in ("offline", "error") and prev == "online":
+            # Lost a previously-working connection. If MAC rediscovery is
+            # enabled, kick a scan; if it finds a new IP we'll reconnect.
+            if self._config.settings.ip_rediscovery_enabled and cam.mac_address:
+                self._kick_rediscovery(cam, reason="offline")
+
+    def _capture_mac(self, cam: Camera) -> None:
+        if cam.use_custom_url or not cam.host:
+            return
+        # Already have a MAC for this exact host — don't re-fingerprint
+        # repeatedly.
+        if cam.mac_address and cam.last_seen_host == cam.host:
+            return
+        if cam.id in self._mac_workers_active:
+            return
+        self._mac_workers_active.add(cam.id)
+        cam_id = cam.id
+        host = cam.host
+        signal = self._mac_fingerprinted
+
+        def worker() -> None:
+            try:
+                mac = fingerprint_camera_mac(host)
+            except Exception:  # pragma: no cover - defensive
+                mac = ""
+            # Emit even on failure so we can clear the active flag on the
+            # UI thread. Qt delivers cross-thread signals via the receiver's
+            # event loop, which is what makes touching ``_config`` here safe.
+            signal.emit(cam_id, mac, host)
+
+        from threading import Thread
+        Thread(target=worker, daemon=True, name="mac-fingerprint").start()
+
+    def _on_mac_fingerprinted(self, camera_id: str, mac: str,
+                               host: str) -> None:
+        self._mac_workers_active.discard(camera_id)
+        if not mac:
+            return
+        cam = self._camera_by_id(camera_id)
+        if cam is None or cam.host != host:
+            # Camera was removed or its host changed while we were
+            # fingerprinting — discard the result.
+            return
+        self._update_camera_fields(camera_id, mac=mac, last_seen=host)
+
+    def _update_camera_fields(self, camera_id: str, *,
+                              mac: str | None = None,
+                              last_seen: str | None = None,
+                              host: str | None = None) -> None:
+        for cam in self._config.cameras:
+            if cam.id != camera_id:
+                continue
+            changed = False
+            if mac is not None and cam.mac_address != mac:
+                cam.mac_address = mac
+                changed = True
+            if last_seen is not None and cam.last_seen_host != last_seen:
+                cam.last_seen_host = last_seen
+                changed = True
+            if host is not None and cam.host != host:
+                cam.host = host
+                changed = True
+            if changed:
+                self._save()
+                _log.info("Camera %s updated: mac=%s last_seen=%s host=%s",
+                          camera_id, cam.mac_address,
+                          cam.last_seen_host, cam.host)
+            return
+
+    def _kick_rediscovery(self, cam: Camera, *, reason: str) -> None:
+        if cam.id in self._rediscoverers:
+            return
+        if not cam.mac_address:
+            return
+        _log.info("Starting IP rediscovery for %s (%s) reason=%s",
+                  cam.id, cam.host, reason)
+        self._status_label.setText(
+            f"\"{cam.name}\" için MAC adresine göre IP aranıyor..."
+        )
+        scanner = schedule_ip_rediscovery(
+            self,
+            camera_id=cam.id,
+            mac=cam.mac_address,
+            rtsp_port=cam.rtsp_port,
+            last_host=cam.host,
+            on_result=self._on_rediscovery_done,
+        )
+        if scanner is not None:
+            self._rediscoverers[cam.id] = scanner
+
+    def _on_rediscovery_done(self, result: RediscoveryResult) -> None:
+        scanner = self._rediscoverers.pop(result.camera_id, None)
+        if scanner is not None:
+            scanner.deleteLater()
+        cam = self._camera_by_id(result.camera_id)
+        if cam is None:
+            self._update_status()
+            return
+        if not result.new_host:
+            _log.info("Rediscovery failed for %s (%s)", cam.id, cam.host)
+            self._status_label.setText(
+                f"\"{cam.name}\" yerel ağda bulunamadı."
+            )
+            return
+        if result.new_host == cam.host:
+            self._update_status()
+            return
+        _log.info("Rediscovery moved %s from %s to %s",
+                  cam.id, cam.host, result.new_host)
+        old_host = cam.host
+        self._update_camera_fields(cam.id,
+                                    host=result.new_host,
+                                    last_seen=result.new_host)
+        # Refresh dependent widgets so the new host takes effect immediately.
+        self._refresh_camera_list(selected_id=self.list_widget.selected_camera_id())
+        self.grid.set_cameras(self._config.cameras)
+        self.ptz_manager.sync(self._config.cameras)
+        self._status_label.setText(
+            f"\"{cam.name}\" yeni IP adresinde bulundu: {old_host} → {result.new_host}"
+        )
 
     def _on_grid_selection_changed(self, camera_id: str) -> None:
         self.restore_btn.setEnabled(bool(camera_id))
