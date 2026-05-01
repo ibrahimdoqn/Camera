@@ -24,6 +24,54 @@ from .config import Camera
 from .stream_worker import StreamWorker
 
 
+# When a tile is stopped, we hand the worker + QThread off to Qt's
+# ownership so PyQt's sip layer doesn't destroy the C++ ``QThread``
+# while ``run()`` is still on the stack. Qt aborts the process at that
+# point with ``QThread: Destroyed while thread is still running``
+# (Windows reports it as ``c0000409 / FAST_FAIL_FATAL_APP_EXIT`` inside
+# Qt6Core.dll). The fallback graveyard set keeps a Python reference if
+# ``sip`` is somehow unavailable, so the wrapper isn't garbage-collected
+# either.
+try:
+    from PyQt6 import sip  # type: ignore
+except ImportError:  # pragma: no cover - sip ships with PyQt6
+    sip = None  # type: ignore
+
+_THREAD_GRAVEYARD: set = set()
+
+
+def _bury_running_thread(worker: object, thread: object) -> None:
+    """Make ``worker`` and ``thread`` survive their tile being deleted.
+
+    Without this, ``CameraTile.stop()`` clearing ``self._worker`` /
+    ``self._thread`` (followed by the tile's own ``deleteLater``) drops
+    the last Python references to the still-running worker thread.
+    PyQt's sip then calls ``~QThread()`` on a thread whose event loop
+    hasn't exited yet — Qt treats that as a fatal programming error and
+    aborts via ``__fastfail`` (``c0000409`` in the Windows error
+    report). We work around it by transferring C++ ownership to Qt so
+    Python GC of the wrapper no longer touches the C++ object; the
+    existing ``worker.finished → deleteLater`` chain destroys both
+    objects safely once ``run()`` actually returns.
+    """
+    if sip is not None:
+        for obj in (worker, thread):
+            try:
+                sip.transferto(obj, None)
+            except (TypeError, ValueError):
+                # transferto raises if the object already has a Qt
+                # parent — that's fine, the parent protects it just as
+                # well as transferto would.
+                pass
+        return
+    # sip missing (shouldn't happen with a normal PyQt6 install). Fall
+    # back to a module-level reference set so the Python wrapper isn't
+    # GC'd. We never remove from this set because doing so would re-
+    # introduce the same race; the leak is bounded by user actions and
+    # cleared on app exit.
+    _THREAD_GRAVEYARD.add((worker, thread))
+
+
 STATUS_COLORS = {
     "connecting": "#ffd60a",
     "online":     "#30d158",
@@ -138,9 +186,13 @@ class CameraTile(QWidget):
                 pass
 
     def stop(self) -> None:
-        if self._worker is not None:
+        if self._worker is not None and self._thread is not None:
             self._detach_worker_signals()
             self._worker.stop()
+            # Hand C++ ownership to Qt before dropping our Python
+            # references. Otherwise ~QThread() runs while ``run()`` is
+            # still in cap.read() and Qt fast-fails the process.
+            _bury_running_thread(self._worker, self._thread)
         # Don't block the UI thread waiting for the worker — let it shut down
         # asynchronously via the finished signal. Signals are already
         # detached, so the in-flight worker can run to completion safely.
@@ -153,16 +205,21 @@ class CameraTile(QWidget):
     def stop_and_wait(self, timeout_ms: int = 1500) -> None:
         """Block briefly so the worker thread can exit cleanly. Use on close."""
         thread = self._thread
-        if self._worker is not None:
+        worker = self._worker
+        if worker is not None:
             self._detach_worker_signals()
-            self._worker.stop()
+            worker.stop()
         self._worker = None
         self._thread = None
         self._stop_audio()
         self._status = "idle"
         if thread is not None:
             thread.quit()
-            thread.wait(timeout_ms)
+            if not thread.wait(timeout_ms) and worker is not None:
+                # Thread refused to exit in time. Don't let sip destroy
+                # the C++ QThread out from under it — bury it instead so
+                # Qt's deleteLater chain (or app shutdown) handles it.
+                _bury_running_thread(worker, thread)
 
     def reset_zoom(self) -> None:
         self._zoom = 1.0
