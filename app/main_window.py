@@ -170,6 +170,7 @@ class MainWindow(QMainWindow):
         self.list_widget.customContextMenuRequested.connect(self._on_list_context_menu)
         self.list_widget.order_changed.connect(self._on_order_changed)
         self.list_widget.mute_toggled.connect(self._on_mute_toggled)
+        self.list_widget.visibility_toggled.connect(self._on_visibility_toggled)
         self.list_widget.overflow_menu_requested.connect(self._on_overflow_menu)
 
         self.add_btn = QPushButton("+ Kamera Ekle")
@@ -242,7 +243,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_sidebar)
 
         self._refresh_camera_list()
-        self.grid.set_cameras(self._config.cameras)
+        self.grid.set_cameras(self._visible_cameras())
         # Kick off ONVIF discovery for every camera right away so PTZ is
         # ready before the user clicks anything.
         self.ptz_manager.sync(self._config.cameras)
@@ -257,6 +258,16 @@ class MainWindow(QMainWindow):
             selected_id = self.list_widget.selected_camera_id()
         self.list_widget.populate(self._config.cameras, selected_id=selected_id)
 
+    def _visible_cameras(self) -> list[Camera]:
+        """Subset of the configured cameras that should appear in the grid.
+
+        Cameras the user has toggled off in the sidebar still live in the
+        configuration (so they can be restored with one click) but never
+        reach :class:`CameraGrid`, which means their stream worker is
+        stopped — exactly what the user asked for when they hide a feed.
+        """
+        return [c for c in self._config.cameras if getattr(c, "visible", True)]
+
     def _camera_by_id(self, cam_id: str | None) -> Camera | None:
         if not cam_id:
             return None
@@ -269,11 +280,16 @@ class MainWindow(QMainWindow):
         save_config(self._config)
 
     def _update_status(self) -> None:
-        n = len(self._config.cameras)
+        total = len(self._config.cameras)
+        visible = len(self._visible_cameras())
         cols = self._config.settings.grid_columns
-        rows = max(1, (n + cols - 1) // cols) if n else 1
+        rows = max(1, (visible + cols - 1) // cols) if visible else 1
+        if visible == total:
+            count_text = f"{total} kamera"
+        else:
+            count_text = f"{visible} / {total} kamera (gizli: {total - visible})"
         self._status_label.setText(
-            f"{n} kamera   ·   {cols}×{rows} ızgara   ·   {self._config.settings.target_fps} FPS"
+            f"{count_text}   ·   {cols}×{rows} ızgara   ·   {self._config.settings.target_fps} FPS"
         )
 
     def _apply_collapsed_state(self) -> None:
@@ -401,7 +417,7 @@ class MainWindow(QMainWindow):
         # setItemWidget(). Without a fresh populate() the second drag hits
         # those dangling references and the UI freezes.
         self._refresh_camera_list(selected_id=self.list_widget.selected_camera_id())
-        self.grid.set_cameras(self._config.cameras)
+        self.grid.set_cameras(self._visible_cameras())
         self.ptz_manager.sync(self._config.cameras)
         self._update_status()
 
@@ -411,7 +427,22 @@ class MainWindow(QMainWindow):
                 cam.audio_enabled = audio_enabled
                 break
         self._save()
-        self.grid.set_cameras(self._config.cameras)
+        self.grid.set_cameras(self._visible_cameras())
+
+    def _on_visibility_toggled(self, camera_id: str, visible: bool) -> None:
+        cam = self._camera_by_id(camera_id)
+        if cam is None or cam.visible == visible:
+            return
+        cam.visible = visible
+        self._save()
+        # Only the grid changes — the sidebar already updated its row state
+        # in-place when the user clicked the eye, and we don't want to
+        # rebuild it here (that would interrupt any drag/selection).
+        self.grid.set_cameras(self._visible_cameras())
+        # If the now-hidden camera was the selected one, drop the PTZ panel.
+        if not visible and self.list_widget.selected_camera_id() == camera_id:
+            self.ptz_panel.set_camera(None)
+        self._update_status()
 
     def _on_tile_selected(self, camera_id: str) -> None:
         if not camera_id:
@@ -432,7 +463,7 @@ class MainWindow(QMainWindow):
             self._config.cameras.append(cam)
             self._save()
             self._refresh_camera_list(selected_id=cam.id)
-            self.grid.set_cameras(self._config.cameras)
+            self.grid.set_cameras(self._visible_cameras())
             self.ptz_manager.sync(self._config.cameras)
             self._update_status()
 
@@ -449,7 +480,7 @@ class MainWindow(QMainWindow):
                     break
             self._save()
             self._refresh_camera_list(selected_id=updated.id)
-            self.grid.set_cameras(self._config.cameras)
+            self.grid.set_cameras(self._visible_cameras())
             self.ptz_manager.sync(self._config.cameras)
             self.ptz_panel.set_camera(self._camera_by_id(updated.id))
 
@@ -468,7 +499,7 @@ class MainWindow(QMainWindow):
         self._config.cameras = [c for c in self._config.cameras if c.id != cam.id]
         self._save()
         self._refresh_camera_list()
-        self.grid.set_cameras(self._config.cameras)
+        self.grid.set_cameras(self._visible_cameras())
         self.ptz_manager.remove(cam.id)
         self.ptz_manager.sync(self._config.cameras)
         self.ptz_panel.set_camera(self._selected_camera())
@@ -497,6 +528,14 @@ class MainWindow(QMainWindow):
     def _on_tile_status_changed(self, camera_id: str, status: str) -> None:
         prev = self._last_tile_status.get(camera_id)
         self._last_tile_status[camera_id] = status
+        # Tell the splash about cameras that failed their first connect
+        # attempt so it can close even when an unreachable camera never
+        # produces a frame. Successful connects are handled via the
+        # ``tile_first_frame`` signal.
+        if (self._splash is not None
+                and status in ("offline", "error")
+                and prev in (None, "connecting")):
+            self._splash.mark_camera_failed(camera_id)
         if prev == status:
             return
         cam = self._camera_by_id(camera_id)
@@ -622,7 +661,7 @@ class MainWindow(QMainWindow):
                                     last_seen=result.new_host)
         # Refresh dependent widgets so the new host takes effect immediately.
         self._refresh_camera_list(selected_id=self.list_widget.selected_camera_id())
-        self.grid.set_cameras(self._config.cameras)
+        self.grid.set_cameras(self._visible_cameras())
         self.ptz_manager.sync(self._config.cameras)
         self._status_label.setText(
             f"\"{cam.name}\" yeni IP adresinde bulundu: {old_host} → {result.new_host}"

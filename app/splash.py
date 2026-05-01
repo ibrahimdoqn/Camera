@@ -52,9 +52,12 @@ class SplashScreen(QWidget):
 
     finished = pyqtSignal()
 
-    # How long we are willing to wait for cameras to connect, even if
-    # some never produce a frame. Keeps the splash from getting stuck.
-    MAX_LIFETIME_MS = 6000
+    # Hard upper bound on how long the splash stays on screen, only used as
+    # a safety net for cameras that never report any state. The normal close
+    # path is "every camera has settled" (either delivered its first frame
+    # or reported offline/error after a real connect attempt), so this only
+    # kicks in if a worker thread is wedged.
+    MAX_LIFETIME_MS = 60000
     MIN_LIFETIME_MS = 900
 
     def __init__(self, total_cameras: int = 0,
@@ -70,7 +73,13 @@ class SplashScreen(QWidget):
                           CARD_H + SHADOW_MARGIN * 2)
 
         self._total = max(0, total_cameras)
+        # Cameras that produced their first frame — these contribute to the
+        # "X / Y kamera hazır" progress message.
         self._ready_ids: set[str] = set()
+        # Cameras that exhausted the initial connect attempt (offline/error)
+        # — they don't count as "hazır" but do release the splash so we
+        # don't sit forever on a single unreachable camera.
+        self._failed_ids: set[str] = set()
         self._message = self._format_progress()
         self._stage = "Başlatılıyor"
         self._angle = 0.0
@@ -152,17 +161,48 @@ class SplashScreen(QWidget):
         if not camera_id:
             return
         self._ready_ids.add(camera_id)
+        # A camera can fail, then succeed on a later reconnect — clear any
+        # stale failure record so it counts as ready going forward.
+        self._failed_ids.discard(camera_id)
         self._stage = "Kameralar bağlanıyor"
         self.set_message(self._format_progress())
-        if self._total and len(self._ready_ids) >= self._total and self._min_elapsed:
-            self._begin_fade_out()
+        self._maybe_close()
+
+    def mark_camera_failed(self, camera_id: str) -> None:
+        """Report that a camera has finished its first connect attempt and
+        is offline/errored. The splash treats it as settled so it can close
+        even when not every camera ever produces a frame."""
+        if not camera_id:
+            return
+        # If the camera already produced a frame in this session, it's
+        # ready — don't downgrade it.
+        if camera_id in self._ready_ids:
+            return
+        self._failed_ids.add(camera_id)
+        self.set_message(self._format_progress())
+        self._maybe_close()
 
     # -- internals --
 
     def _format_progress(self) -> str:
         if not self._total:
             return "Hazırlanıyor..."
-        return f"{len(self._ready_ids)} / {self._total} kamera hazır"
+        ready = len(self._ready_ids)
+        failed = len(self._failed_ids)
+        if failed:
+            return f"{ready} / {self._total} kamera hazır  ·  {failed} bağlanamadı"
+        return f"{ready} / {self._total} kamera hazır"
+
+    def _settled_count(self) -> int:
+        return len(self._ready_ids | self._failed_ids)
+
+    def _maybe_close(self) -> None:
+        """Close the splash once every camera has settled and the minimum
+        on-screen time has elapsed."""
+        if not self._total:
+            return
+        if self._settled_count() >= self._total and self._min_elapsed:
+            self._begin_fade_out()
 
     def _on_min_elapsed(self) -> None:
         self._min_elapsed = True
@@ -170,8 +210,7 @@ class SplashScreen(QWidget):
         if self._total == 0:
             self._begin_fade_out()
             return
-        if len(self._ready_ids) >= self._total:
-            self._begin_fade_out()
+        self._maybe_close()
 
     def _tick(self) -> None:
         # ~360°/second — feels active but not jittery.

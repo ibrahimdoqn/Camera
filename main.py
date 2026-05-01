@@ -37,10 +37,12 @@ def main() -> int:
     app.setStyleSheet(APP_STYLESHEET)
 
     # Animated splash screen: show first, build the main window behind it,
-    # and only reveal the main window after every camera has produced its
-    # first frame (or a short timeout elapses).
+    # and only reveal the main window after every visible camera has
+    # settled (delivered its first frame or reported offline/error). Hidden
+    # cameras don't have a stream worker, so they're skipped.
     cfg = load_config()
-    splash = SplashScreen(total_cameras=len(cfg.cameras))
+    visible_count = sum(1 for c in cfg.cameras if getattr(c, "visible", True))
+    splash = SplashScreen(total_cameras=visible_count)
     splash.set_stage("Yapılandırma okunuyor")
     splash.start()
     app.processEvents()
@@ -48,7 +50,7 @@ def main() -> int:
     splash.set_stage("Pencere hazırlanıyor")
     app.processEvents()
     window = MainWindow(preloaded_config=cfg, splash=splash)
-    if cfg.cameras:
+    if visible_count:
         splash.set_stage("Kameralara bağlanılıyor")
     else:
         splash.set_stage("Hazırlanıyor")

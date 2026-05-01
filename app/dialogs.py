@@ -135,6 +135,12 @@ class CameraDialog(QDialog):
                 custom_url=self.custom_edit.text().strip(),
                 use_custom_url=self.custom_check.isChecked(),
             )
+        # Preserve fields the dialog does not edit. Without this, saving a
+        # camera would silently clear ``audio_enabled``, ``visible``,
+        # ``mac_address``, and ``last_seen_host`` because they fall back to
+        # dataclass defaults — that would, for example, force MAC-based
+        # rediscovery to start from scratch and re-show a user-hidden
+        # camera.
         return Camera(
             id=self._camera.id,
             name=name,
@@ -146,6 +152,10 @@ class CameraDialog(QDialog):
             stream=self.stream_combo.currentData(),
             custom_url=self.custom_edit.text().strip(),
             use_custom_url=self.custom_check.isChecked(),
+            audio_enabled=self._camera.audio_enabled,
+            visible=getattr(self._camera, "visible", True),
+            mac_address=self._camera.mac_address,
+            last_seen_host=self._camera.last_seen_host,
         )
 
 

@@ -32,6 +32,11 @@ class Camera:
     custom_url: str = ""
     use_custom_url: bool = False
     audio_enabled: bool = False  # default: all cameras muted
+    # Sidebar visibility: when False the camera stays in the sidebar (so
+    # the user can re-enable it) but is removed from the grid and its
+    # stream worker is stopped. Defaults to True so existing configs keep
+    # showing every camera after upgrading.
+    visible: bool = True
     # Captured the first time the camera is reached over the LAN; used by
     # the MAC-based IP rediscovery scan when the configured host stops
     # responding.

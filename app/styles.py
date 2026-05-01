@@ -142,6 +142,16 @@ QPushButton#OverflowButton:hover {{
     background-color: {COLORS['bg_hover']};
 }}
 
+QPushButton#VisibilityButton {{
+    background-color: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 0;
+}}
+QPushButton#VisibilityButton:hover {{
+    background-color: {COLORS['bg_hover']};
+}}
+
 /* Inside a selected (blue) row, the mute toggle & dot must remain visible. */
 QWidget#CameraRow[selected="true"] QPushButton#MuteButton {{
     color: white;
@@ -159,6 +169,22 @@ QWidget#CameraRow[selected="true"] QPushButton#OverflowButton {{
 }}
 QWidget#CameraRow[selected="true"] QPushButton#OverflowButton:hover {{
     background-color: rgba(255, 255, 255, 0.30);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#VisibilityButton {{
+    background-color: rgba(255, 255, 255, 0.18);
+}}
+QWidget#CameraRow[selected="true"] QPushButton#VisibilityButton:hover {{
+    background-color: rgba(255, 255, 255, 0.30);
+}}
+
+/* Hidden rows fade their text so the eye-with-slash toggle reads as
+   "off" at a glance without changing the row's footprint. */
+QWidget#CameraRow[hidden="true"] QLabel#CameraRowName {{
+    color: {COLORS['text_muted']};
+}}
+QWidget#CameraRow[hidden="true"] QLabel#CameraRowSub {{
+    color: {COLORS['text_muted']};
+    font-style: italic;
 }}
 
 QPushButton#PtzButton {{

@@ -13,6 +13,7 @@ from typing import Optional
 from PyQt6.QtCore import (
     QEasingCurve,
     QPoint,
+    QPointF,
     QPropertyAnimation,
     QRect,
     QRectF,
@@ -61,12 +62,14 @@ class CameraRow(QWidget):
     """
 
     mute_toggled = pyqtSignal(str, bool)            # camera_id, audio_enabled
+    visibility_toggled = pyqtSignal(str, bool)      # camera_id, visible
     menu_requested = pyqtSignal(str, QPoint)        # camera_id, global pos
 
     def __init__(self, camera: Camera, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._cam_id = camera.id
         self._selected = False
+        self._hidden = not bool(getattr(camera, "visible", True))
         self.setObjectName("CameraRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setMinimumHeight(ROW_HEIGHT)
@@ -93,6 +96,13 @@ class CameraRow(QWidget):
         text_col.addWidget(self._name)
         text_col.addWidget(self._sub)
 
+        self._visibility_btn = VisibilityButton()
+        self._visibility_btn.setObjectName("VisibilityButton")
+        self._visibility_btn.setFixedSize(28, 28)
+        self._visibility_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._visibility_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._visibility_btn.clicked.connect(self._on_visibility_clicked)
+
         self._mute_btn = QPushButton()
         self._mute_btn.setObjectName("MuteButton")
         self._mute_btn.setFixedSize(28, 28)
@@ -111,9 +121,10 @@ class CameraRow(QWidget):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 8, 8, 8)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
         layout.addWidget(self._dot, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(text_col, 1)
+        layout.addWidget(self._visibility_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._mute_btn, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self._menu_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
@@ -175,12 +186,27 @@ class CameraRow(QWidget):
         # describes the device class instead — the IP is one click away in
         # the overflow menu (Bilgi / Info).
         if camera.use_custom_url and camera.custom_url:
-            self._sub.setText("Özel RTSP")
+            self._default_sub = "Özel RTSP"
         elif camera.host:
-            self._sub.setText("IP kamera")
+            self._default_sub = "IP kamera"
         else:
-            self._sub.setText("Yapılandırılmamış")
+            self._default_sub = "Yapılandırılmamış"
         self._set_mute_visual(camera.audio_enabled)
+        self._set_visibility_visual(getattr(camera, "visible", True))
+
+    def _set_visibility_visual(self, visible: bool) -> None:
+        self._hidden = not visible
+        self._sub.setText("Gizli" if self._hidden
+                           else getattr(self, "_default_sub", "IP kamera"))
+        self._visibility_btn.set_hidden(self._hidden)
+        self._visibility_btn.setToolTip(
+            "Izgarada göster" if self._hidden else "Izgaradan gizle"
+        )
+        # Re-polish so the [hidden="true"] QSS selector takes effect on the
+        # row's text colours.
+        self.setProperty("hidden", self._hidden)
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def _set_mute_visual(self, audio_on: bool) -> None:
         self._mute_btn.blockSignals(True)
@@ -193,6 +219,11 @@ class CameraRow(QWidget):
         new_state = self._mute_btn.isChecked()
         self._set_mute_visual(new_state)
         self.mute_toggled.emit(self._cam_id, new_state)
+
+    def _on_visibility_clicked(self) -> None:
+        new_visible = self._hidden  # toggling: hidden→visible, visible→hidden
+        self._set_visibility_visual(new_visible)
+        self.visibility_toggled.emit(self._cam_id, new_visible)
 
     def _on_menu_clicked(self) -> None:
         # Open the menu just under the button so it visually anchors there.
@@ -223,11 +254,83 @@ class OverflowButton(QPushButton):
                                         radius * 2, radius * 2))
 
 
+class VisibilityButton(QPushButton):
+    """Eye / eye-with-slash toggle. Painted manually so the glyph stays
+    perfectly centred across fonts — the standard ``👁``/``👁‍🗨`` emoji shift
+    several pixels between Segoe UI Emoji versions on Windows."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._hidden = False
+
+    def set_hidden(self, hidden: bool) -> None:
+        if self._hidden == hidden:
+            return
+        self._hidden = hidden
+        self.update()
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+
+        # Hidden cameras get a softer colour so the row clearly reads as
+        # "off" without dimming the entire row's text.
+        if not self.isEnabled():
+            color = QColor("#6a6a70")
+        elif self._hidden:
+            color = QColor("#ffffff") if self.underMouse() else QColor("#8a8a90")
+        else:
+            color = QColor("#ffffff") if self.underMouse() else QColor("#c7c7cc")
+
+        # Almond eye outline.
+        ew = 8.0   # half-width of the eye
+        eh = 4.4   # peak height of the lid arcs
+        path = QPainterPath()
+        path.moveTo(cx - ew, cy)
+        path.quadTo(QPointF(cx, cy - eh * 1.6), QPointF(cx + ew, cy))
+        path.quadTo(QPointF(cx, cy + eh * 1.6), QPointF(cx - ew, cy))
+        pen = QPen(color)
+        pen.setWidthF(1.6)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+
+        if not self._hidden:
+            # Pupil — a small filled dot in the centre.
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(QPointF(cx, cy), 1.9, 1.9)
+        else:
+            # Diagonal slash through the eye to indicate "hidden". A two-pen
+            # approach (background-coloured underlay then the foreground
+            # line) keeps the slash legible even where it crosses the eye
+            # outline.
+            slash_a = QPointF(cx - ew - 1.5, cy + eh + 2.0)
+            slash_b = QPointF(cx + ew + 1.5, cy - eh - 2.0)
+            under = QPen(QColor("#1c1c1e"))
+            under.setWidthF(3.4)
+            under.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(under)
+            painter.drawLine(slash_a, slash_b)
+            over = QPen(color)
+            over.setWidthF(1.6)
+            over.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(over)
+            painter.drawLine(slash_a, slash_b)
+
+
 class CameraList(QListWidget):
     """Drag-and-drop sortable list of camera rows."""
 
     order_changed = pyqtSignal(list)              # list[str] of camera ids
     mute_toggled = pyqtSignal(str, bool)
+    visibility_toggled = pyqtSignal(str, bool)    # camera_id, visible
     selection_changed = pyqtSignal(str)           # current camera_id ("" if none)
     item_double_clicked_id = pyqtSignal(str)      # camera_id
     overflow_menu_requested = pyqtSignal(str, QPoint)  # camera_id, global pos
@@ -261,6 +364,7 @@ class CameraList(QListWidget):
             item.setData(Qt.ItemDataRole.UserRole, cam.id)
             row = CameraRow(cam)
             row.mute_toggled.connect(self.mute_toggled)
+            row.visibility_toggled.connect(self.visibility_toggled)
             row.menu_requested.connect(self.overflow_menu_requested)
             item.setSizeHint(QSize(180, ROW_HEIGHT + 4))
             self.addItem(item)

@@ -8,21 +8,24 @@ Sadece izleme odaklıdır. Hareket veya kişi algılama gibi özellikler içerme
 
 - Modern, koyu temalı, Apple tarzı arayüz (PyQt6 + özel QSS)
 - **Animasyonlu açılış (splash) ekranı**: Windows 11 tarzı **dönen ilerleme halkası** (progress ring) ile birlikte aşamayı yazan bir alt başlık gösterilir (örn. *"Kameralara bağlanılıyor"*, *"3 / 4 kamera hazır"*); kart gölgesi artık manuel çizilir, böylece Windows'ta bazı sürücülerde görülen `UpdateLayeredWindowIndirect failed` uyarısı oluşmaz
+- **Splash ekranı tüm kameralar yerleşene kadar açık kalır**: önceden 6 saniyelik sabit bir zaman aşımı vardı, bu yüzden ağda yavaş kalkan kameralar siyah kutu olarak göründüğünde splash erken kapanıyordu. Artık her kameranın ya **ilk karesini ürettiği** ya da **çevrim dışı/hata** olarak yerleştiği kesinleşene kadar splash açık kalır; ulaşılamayan kamera olursa ilerleme yazısında *"X / Y kamera hazır · N bağlanamadı"* olarak gösterilir. Yine de takılma olmaması için 60 saniyelik son durak (hard timeout) korunur
 - Çoklu kamera için **grid (ızgara) görünümü**, sütun sayısı **Ayarlar** üzerinden 1–8 arası seçilebilir
 - Bir kameraya **tıklayarak seçim**, **çift tıklayınca tam ekran**; tekrar çift tık / `Esc` / "Tüm Izgara" ile geri dönüş
 - **Sol menüden veya kamera kutusuna tıklayarak** kamera seçimi (seçili kamera çerçeveyle vurgulanır). Seçili kamera tile'ında ad ve durum rozeti **büyütülerek beyaz halka ile çevrelenir**, böylece mavi seçim kenarlığının içinde de net okunur
 - **Sürükle-bırak** ile sol menüde kameraları yeniden sıralama: tutulan kart **yuvarlak köşeli, gölgeli bir önizleme** olarak imleçle taşınır (önceki sürümlerdeki keskin kutu görüntüsü kalktı); art arda yapılan sıralamalarda artık kilitlenme oluşmaz (`rowsMoved` sinyali sıralama tamamlandıktan sonra yeniden yayınlanır ve liste güvenli biçimde yeniden oluşturulur)
-- **Modern kamera kartı**: kart üzerinde durum noktası, ad, alt başlık (ör. *IP kamera*), ses düğmesi ve **3 nokta (⋮) menü düğmesi**. IP adresi listede artık görünmez; istenirse "Bilgi" menüsünden açılır
+- **Sol menüden kameraları tek tuşla göster / gizle**: her kartta yeni bir **göz simgesi** vardır. Tıklayınca kamera ızgaradan çıkar, RTSP akışı durdurulur (CPU/ağ kullanımı düşer) ve sol menüde *"Gizli"* etiketiyle, italik soluk yazı + üzeri çizili göz ikonu ile gösterilir. Tekrar tıklayınca kamera anında geri gelir ve yayın yeniden başlar. Gizli/görünür durum yapılandırma dosyasında saklanır, yani uygulama bir sonraki açılışta da aynı seçimi hatırlar. Splash sayacı yalnızca **görünür** kameraları sayar; durum çubuğu *"3 / 5 kamera (gizli: 2)"* biçiminde özet verir
+- **Modern kamera kartı**: kart üzerinde durum noktası, ad, alt başlık (ör. *IP kamera*), **görünürlük (göz)** düğmesi, ses düğmesi ve **3 nokta (⋮) menü düğmesi**. IP adresi listede artık görünmez; istenirse "Bilgi" menüsünden açılır
 - **3 nokta / sağ tık menüsü**: Bilgi (cihaz özetini açar), Düzenle, **Yerel ağda yeniden bul** (MAC ile), Kaldır
 - **Ses açma/kapama** her kamera için ayrı düğme; varsayılan olarak tüm sesler kapalıdır. Ses, RTSP'yi gerçekten çözebilen **libVLC** üzerinden çalınır (yedek olarak Qt `QMediaPlayer`)
 - **Kamera Hareket (PTZ)** paneli yalnızca bir kamera seçildiğinde görünür; kamera adı net şekilde yazılır ve panel sol menüde ortalıdır. PTZ ok düğmeleri ve durdur düğmesi artık **özel çizilmiş** simgelerle (font'tan bağımsız) **piksel hassasiyetle** ortalıdır
 - ONVIF PTZ keşfi **uygulama açılışında** her kamera için arka planda yapılır — kameraya tıkladığınızda hareket panelinde **bekleme yoktur**, kontroller anında hazırdır
 - **Mouse tekerleği ile zoom artık imleç merkezlidir**: tekerleği çevirdiğiniz noktanın üzerine yakınlaşır; sürükleyerek pan; sağ tık zoom'u sıfırlar
 - **Daraltılmış sol menüde aç/kapa düğmesi**: chevron simgesi de **özel çizilir**, yatayda ve dikeyde tam ortalıdır (Unicode karakterlerin font'a göre kayma sorunu giderildi)
-- Kalıcı yapılandırma (`%APPDATA%/TapoViewer/config.json`); kamera başına **MAC adresi** ve **son görüldüğü IP** otomatik olarak saklanır
+- Kalıcı yapılandırma (`%APPDATA%/TapoViewer/config.json`); kamera başına **MAC adresi**, **son görüldüğü IP** ve **görünürlük (gizli/açık)** durumu otomatik olarak saklanır
 - **MAC adresine göre IP yeniden keşif**: bir kameranın IP'si değiştiğinde (DHCP rotasyonu) yerel /24 ağı taranıp aynı MAC adresi tekrar bulunur, RTSP portu açık ise kamera otomatik yeni IP'ye taşınır. Manuel tetikleme için 3-nokta menüsünde **"Yerel ağda yeniden bul"** seçeneği vardır. Bu özellik Ayarlar üzerinden kapatılabilir
 - **Dosya tabanlı log kayıtları**: Ayarlar'dan açılınca olaylar `%APPDATA%/TapoViewer/logs/tapoviewer.log` altına dönen (rotating) bir dosyaya yazılır. Log seviyesi DEBUG / INFO / WARNING / ERROR olarak seçilebilir; varsayılan kapalıdır
-- **Ayarlar penceresi**: hedef FPS, sütun sayısı, yeniden bağlanma süresi, donanım hızlandırma seçimi, durum rozetini gösterme, **log kayıtları**, **log seviyesi**, **MAC tabanlı IP yeniden keşif** — değişiklikler **canlı** uygulanır, FPS değişimi artık uygulamayı kilitlemez
+- **Ayarlar penceresi**: hedef FPS, sütun sayısı, yeniden bağlanma süresi, donanım hızlandırma seçimi, durum rozetini gösterme, **log kayıtları**, **log seviyesi**, **MAC tabanlı IP yeniden keşif** — değişiklikler **canlı** uygulanır, FPS değişimi artık uygulamayı kilitlemez. **HW hızlandırma** değişimi yalnızca o kamera için bir **yeniden bağlantı tetikler** (uygulama açık kalır), çünkü FFmpeg dekoderi `VideoCapture` oluşturulurken seçer
+- **Gerçek GPU hızlandırma**: ayarda seçilen mod artık her RTSP akışına uygulanır. OpenCV `CAP_PROP_HW_ACCELERATION` özelliği ile birlikte FFmpeg'e `OPENCV_FFMPEG_CAPTURE_OPTIONS` ortam değişkeni üzerinden `hwaccel;<mod>|hwaccel_output_format;<mod>` parametreleri geçilir, böylece kareler GPU bellekte çözülür ve son aşamada CPU'ya kopyalanır. NVIDIA RTX kartlarda **CUDA** seçildiğinde dekoder NVDEC'e yönlendirilir (CPU yükü belirgin biçimde düşer, görev yöneticisindeki "Video Decode" sayacı yükselir). Modlar: `auto` (en uygunu seç), `none` (saf CPU), `cuda` (NVIDIA NVDEC), `d3d11va` (Windows DXVA 2.0), `dxva2` (alternatif DirectX yolu)
 - Otomatik **yeniden bağlanma** ve canlı **bağlantı durumu rozeti** (connecting / online / offline)
 - Sağ alt durum çubuğunda **CPU / GPU / Ağ kullanımı** göstergesi
 - TCP üzerinden RTSP (varsayılan), düşük gecikme için ayarlanmış FFmpeg seçenekleri
@@ -91,12 +94,16 @@ Uygulama bu URL'i girdiğiniz alanlardan otomatik üretir; isterseniz "Özel RTS
 | `Ctrl+,`    | Ayarları aç                 |
 | `Ctrl+B`    | Sol menüyü daralt/genişlet  |
 
+> **İpucu — kameraları tek tuşla gizle**: sol menüdeki kart üzerinde **göz simgesi** vardır. Bir tık ile kamerayı ızgaradan çıkarır (RTSP akışı durdurulur), tekrar tık ile geri getirir. Kart sol menüde *"Gizli"* yazısı ve üzeri çizili göz simgesi ile durmaya devam eder, böylece istediğiniz an geri açabilirsiniz.
+
 ## Mouse
 
 | Hareket                       | İşlev                                       |
 |-------------------------------|---------------------------------------------|
 | Sol tık (kamera)              | Kamerayı seç                                |
 | Çift tık (kamera)             | Tam ekran / geri al                         |
+| 👁 düğmesi (sol menü)         | Kamerayı ızgarada göster / gizle (tek tık)  |
+| 🔊 düğmesi (sol menü)         | Sesi aç / kapat                             |
 | ⋮ düğmesi (sol menü)          | Bilgi / Düzenle / Yeniden bul / Kaldır      |
 | Sağ tık (sol menü)            | Bilgi / Düzenle / Yeniden bul / Kaldır      |
 | Tekerlek                      | Zoom (cursor merkezli)                      |
@@ -124,7 +131,9 @@ app/config.py               # yapılandırma kalıcılığı (kamera + MAC + aya
 app/styles.py               # Apple tarzı QSS
 ```
 
-Her kamera kendi `QThread`'inde çalışır. OpenCV `VideoCapture` (FFmpeg backend) frame'leri yakalar, `pyqtSignal` ile UI thread'ine iletir, `QPainter` ile çizilir. Ses gerektiğinde paralel bir **libVLC** oynatıcısıyla çalınır (RTSP'yi destekler); libVLC bulunmazsa Qt `QMediaPlayer` yedek olarak denenir. Varsayılan olarak tüm sesler kapalıdır.
+Her **görünür** kamera kendi `QThread`'inde çalışır. Sol menüdeki göz simgesiyle gizlenen kameralar için `CameraTile` ve `StreamWorker` hiç oluşturulmaz, böylece RTSP/dekoder yükü tamamen ortadan kalkar; kullanıcı tekrar görünür yaptığında thread baştan ayağa kalkar. OpenCV `VideoCapture` (FFmpeg backend) frame'leri yakalar, `pyqtSignal` ile UI thread'ine iletir, `QPainter` ile çizilir. Donanım hızlandırma için her `VideoCapture` açılışında `OPENCV_FFMPEG_CAPTURE_OPTIONS` ortam değişkeni güncellenir (`hwaccel;<mod>|hwaccel_output_format;<mod>`) ve OpenCV tarafında `CAP_PROP_HW_ACCELERATION` özelliği ayarlanır — böylece NVDEC / DXVA2 / D3D11 yolu seçildiğinde kareler GPU bellekte çözülür. Ses gerektiğinde paralel bir **libVLC** oynatıcısıyla çalınır (RTSP'yi destekler); libVLC bulunmazsa Qt `QMediaPlayer` yedek olarak denenir. Varsayılan olarak tüm sesler kapalıdır.
+
+Açılış splash'ı, her görünür kamera için `CameraTile.first_frame` (başarı yolu) veya `tile_status_changed("offline"/"error")` (ulaşılamayan kamera yolu) sinyallerini bekler. İki sinyal de yerleşene kadar splash kapanmaz; en geç 60 saniye sonra son durak (hard timeout) devreye girer.
 
 ONVIF (PTZ) bağlantıları açılış sırasında `PtzManager` tarafından her kamera için arka planda kurulur; yetenek/preset bilgileri önbelleğe alınır. Hareket paneli açıldığında bu önbellek kullanıldığı için kamera değiştirirken bekleme yaşanmaz.
 
