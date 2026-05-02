@@ -10,7 +10,7 @@ os.environ.setdefault(
     "rtsp_transport;tcp|stimeout;5000000|max_delay;500000|buffer_size;1024000",
 )
 
-from PyQt6.QtGui import QFont, QFontDatabase
+from PyQt6.QtGui import QFont, QFontDatabase, QIcon
 from PyQt6.QtWidgets import QApplication
 
 from app.config import load_config
@@ -19,12 +19,31 @@ from app.splash import SplashScreen
 from app.styles import APP_STYLESHEET
 
 
+def _resource_path(relative: str) -> str:
+    """Resolve a bundled resource path for both dev and PyInstaller runs."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative)
+
+
 def main() -> int:
     # High-DPI scaling is enabled by default in PyQt6; no setAttribute needed.
     app = QApplication(sys.argv)
     app.setApplicationName("Tapo Viewer")
     app.setOrganizationName("TapoViewer")
     app.setStyle("Fusion")
+
+    for icon_name in ("Tapo.ico", "Tapo.png"):
+        icon_path = _resource_path(icon_name)
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
+            break
+
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TapoViewer.App")
+        except Exception:
+            pass
 
     # Prefer SF Pro / Inter / Segoe UI Variable for the Apple-like feel.
     preferred = ["SF Pro Display", "SF Pro Text", "Inter", "Segoe UI Variable", "Segoe UI"]
