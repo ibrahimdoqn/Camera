@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import time
 from typing import Optional
 
@@ -13,6 +14,10 @@ try:
     import psutil  # type: ignore
 except ImportError:  # pragma: no cover
     psutil = None  # type: ignore
+
+
+# Avoid flashing a console window when running as a windowed Windows .exe.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 class _GpuProbe(QObject):
@@ -49,6 +54,7 @@ class _GpuProbe(QObject):
                 ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
                 stderr=subprocess.DEVNULL,
                 timeout=2.0,
+                creationflags=_NO_WINDOW,
             )
             self._available = True
             return float(out.decode().strip().splitlines()[0])

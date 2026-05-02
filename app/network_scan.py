@@ -21,6 +21,7 @@ import platform
 import re
 import socket
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Iterable, Optional
@@ -31,6 +32,10 @@ from .logger import get_logger
 
 
 _log = get_logger("network_scan")
+
+
+# Avoid flashing a console window when running as a windowed Windows .exe.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 _MAC_RE = re.compile(r"([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}")
@@ -68,12 +73,14 @@ def _arp_table() -> dict[str, str]:
                 ["arp", "-a"],
                 stderr=subprocess.DEVNULL,
                 timeout=5.0,
+                creationflags=_NO_WINDOW,
             ).decode("utf-8", errors="ignore")
         else:
             out = subprocess.check_output(
                 ["arp", "-an"],
                 stderr=subprocess.DEVNULL,
                 timeout=5.0,
+                creationflags=_NO_WINDOW,
             ).decode("utf-8", errors="ignore")
     except (subprocess.SubprocessError, FileNotFoundError, OSError):
         return result
@@ -102,6 +109,7 @@ def _ping(host: str, timeout: float = 0.6) -> bool:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=timeout + 1.0,
+            creationflags=_NO_WINDOW,
         ) == 0
     except (subprocess.SubprocessError, OSError):
         return False
