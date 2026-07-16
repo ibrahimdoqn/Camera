@@ -4,12 +4,6 @@ from __future__ import annotations
 import os
 import sys
 
-# Force FFmpeg backend with low-latency settings before importing OpenCV.
-os.environ.setdefault(
-    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    "rtsp_transport;tcp|stimeout;5000000|max_delay;500000|buffer_size;1024000",
-)
-
 from PyQt6.QtGui import QFont, QFontDatabase, QIcon
 from PyQt6.QtWidgets import QApplication
 

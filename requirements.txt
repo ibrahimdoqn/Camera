@@ -1,20 +1,16 @@
 PyQt6>=6.6.0
-opencv-python>=4.9.0
 numpy>=1.26.0
 onvif-zeep>=0.2.12
 psutil>=5.9.0
-# python-vlc drives two features:
-#   * RTSP audio playback (Qt's QMediaPlayer can't decode RTSP audio on
-#     Windows, so audio is always delegated to libVLC).
-#   * The "VLC" playback engine — a native-window video embed that
-#     inherits VLC's automatic HW-accel path (DXVA2 / D3D11 / NVDEC
-#     depending on the GPU).
-# Requires VLC to also be installed system-wide
-# (https://www.videolan.org/vlc/) so libvlc.dll is on PATH.
+# python-vlc is the sole video + audio backend. libVLC handles the RTSP
+# client, the codec pipeline and (crucially) the hardware-accelerated
+# decode path — DXVA2 / D3D11 on Windows, VAAPI on Linux, VideoToolbox
+# on macOS, plus NVDEC (via ``--avcodec-hw=nvdec``) on NVIDIA GPUs and
+# Quick Sync on Intel iGPUs. Requires VLC to also be installed
+# system-wide (https://www.videolan.org/vlc/) in the same 32/64-bit
+# architecture as the Python interpreter, so libvlc.dll is reachable.
 python-vlc>=3.0.0
-# The "External FFmpeg" playback engine shells out to the system
-# ffmpeg + ffprobe binaries to get direct access to the native
-# ``-hwaccel`` flag (d3d11va / dxva2 / cuda / qsv). Install from
-# https://www.gyan.dev/ffmpeg/builds/ and make sure ffmpeg.exe /
-# ffprobe.exe are on PATH. Optional — only needed if you pick the
-# "Harici FFmpeg" backend in Settings.
+# opencv-python is optional. It's only used as a fallback for GPU
+# detection (cv2.cuda.getCudaEnabledDeviceCount) when ``nvidia-smi`` is
+# not on PATH — the app runs fine without it.
+opencv-python>=4.9.0
