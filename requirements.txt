@@ -3,8 +3,18 @@ opencv-python>=4.9.0
 numpy>=1.26.0
 onvif-zeep>=0.2.12
 psutil>=5.9.0
-# python-vlc enables RTSP audio playback. Qt's QMediaPlayer cannot decode
-# RTSP audio on Windows, so we delegate audio to libVLC. Requires VLC to
-# also be installed system-wide (https://www.videolan.org/vlc/) so that
-# libvlc.dll is on PATH.
+# python-vlc drives two features:
+#   * RTSP audio playback (Qt's QMediaPlayer can't decode RTSP audio on
+#     Windows, so audio is always delegated to libVLC).
+#   * The "VLC" playback engine — a native-window video embed that
+#     inherits VLC's automatic HW-accel path (DXVA2 / D3D11 / NVDEC
+#     depending on the GPU).
+# Requires VLC to also be installed system-wide
+# (https://www.videolan.org/vlc/) so libvlc.dll is on PATH.
 python-vlc>=3.0.0
+# The "External FFmpeg" playback engine shells out to the system
+# ffmpeg + ffprobe binaries to get direct access to the native
+# ``-hwaccel`` flag (d3d11va / dxva2 / cuda / qsv). Install from
+# https://www.gyan.dev/ffmpeg/builds/ and make sure ffmpeg.exe /
+# ffprobe.exe are on PATH. Optional — only needed if you pick the
+# "Harici FFmpeg" backend in Settings.

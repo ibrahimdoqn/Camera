@@ -61,7 +61,15 @@ class Camera:
 class Settings:
     grid_columns: int = 2
     target_fps: int = 20
-    hw_accel: str = "auto"  # auto | none | dxva2 | d3d11va | cuda
+    hw_accel: str = "auto"  # auto | none | dxva2 | d3d11va | cuda | qsv
+    # Playback engine used to decode + display each RTSP stream:
+    #   opencv  — bundled OpenCV/FFmpeg (works everywhere, HW-accel spotty)
+    #   ffmpeg  — external ffmpeg.exe subprocess (native -hwaccel flag,
+    #             the most reliable HW-decode path when opencv falls back
+    #             to CPU)
+    #   vlc     — libVLC with native window embedding (HW-decode is
+    #             automatic and rendered directly by VLC, lowest CPU cost)
+    playback_backend: str = "opencv"
     decode_width: int = 0  # 0 = native
     reconnect_delay: float = 3.0
     show_overlay: bool = True

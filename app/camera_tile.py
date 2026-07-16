@@ -21,7 +21,8 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QSizePolicy, QWidget
 
 from .config import Camera
-from .stream_worker import StreamWorker
+from .stream_worker import FFmpegSubprocessWorker, StreamWorker
+from .vlc_view import VLCVideoWidget
 
 
 # When a tile is stopped, we hand the worker + QThread off to Qt's
@@ -96,6 +97,7 @@ class CameraTile(QWidget):
 
     def __init__(self, camera: Camera, target_fps: int = 20, reconnect_delay: float = 3.0,
                  show_overlay: bool = True, hw_accel: str = "auto",
+                 playback_backend: str = "opencv",
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.camera = camera
@@ -103,6 +105,7 @@ class CameraTile(QWidget):
         self._reconnect_delay = reconnect_delay
         self._show_overlay = show_overlay
         self._hw_accel = hw_accel or "auto"
+        self._playback_backend = (playback_backend or "opencv").lower()
         self._selected = False
 
         self._pixmap: Optional[QPixmap] = None
@@ -114,8 +117,11 @@ class CameraTile(QWidget):
         self._zoom: float = 1.0
         self._pan = QPointF(0.0, 0.0)  # in widget pixels (offset of image center)
 
-        self._worker: Optional[StreamWorker] = None
+        self._worker = None  # StreamWorker | FFmpegSubprocessWorker | None
         self._thread: Optional[QThread] = None
+        # Only populated when playback_backend == "vlc". The widget owns
+        # its own libVLC MediaPlayer and paints directly to a native HWND.
+        self._vlc_widget: Optional[VLCVideoWidget] = None
 
         # Audio playback (lazy-init, only when enabled).
         # Backend can be either libVLC (preferred — actually supports RTSP
@@ -134,11 +140,28 @@ class CameraTile(QWidget):
     # -- public API --
 
     def start(self) -> None:
-        if self._thread is not None:
+        if self._thread is not None or self._vlc_widget is not None:
             return
         self._status = "connecting"
+        if self._playback_backend == "vlc":
+            self._start_vlc_widget()
+        else:
+            self._start_worker()
+        self._apply_audio_state()
+
+    def _start_worker(self) -> None:
+        """Spin up a frame-emitting worker (OpenCV or FFmpeg subprocess).
+
+        Both backends share the same signal contract; the tile paints the
+        frames itself via ``_on_frame`` so overlay + zoom/pan keep working.
+        """
         thread = QThread()
-        worker = StreamWorker(
+        worker_cls = (
+            FFmpegSubprocessWorker
+            if self._playback_backend == "ffmpeg"
+            else StreamWorker
+        )
+        worker = worker_cls(
             url=self.camera.rtsp_url,
             target_fps=self._target_fps,
             reconnect_delay=self._reconnect_delay,
@@ -155,7 +178,25 @@ class CameraTile(QWidget):
         thread.start()
         self._worker = worker
         self._thread = thread
-        self._apply_audio_state()
+
+    def _start_vlc_widget(self) -> None:
+        """Attach a libVLC-backed video surface as a child widget."""
+        vlc_widget = VLCVideoWidget(self)
+        vlc_widget.status_changed.connect(self._on_status)
+        vlc_widget.error.connect(self._on_error)
+        vlc_widget.first_frame.connect(self._on_vlc_first_frame)
+        vlc_widget.setGeometry(self._vlc_child_rect())
+        vlc_widget.show()
+        vlc_widget.raise_()
+        vlc_widget.start(self.camera.rtsp_url, self._hw_accel)
+        self._vlc_widget = vlc_widget
+
+    def _vlc_child_rect(self):
+        """Rectangle the VLC child covers — leaves the rounded border showing."""
+        # Inset by the same amount we round the border so the black native
+        # HWND doesn't clip through the tile's corner radius.
+        margin = 2
+        return self.rect().adjusted(margin, margin, -margin, -margin)
 
     def _detach_worker_signals(self) -> None:
         """Disconnect the tile's slots from the live worker.
@@ -198,8 +239,10 @@ class CameraTile(QWidget):
         # detached, so the in-flight worker can run to completion safely.
         self._worker = None
         self._thread = None
+        self._teardown_vlc_widget()
         self._stop_audio()
         self._status = "idle"
+        self._pixmap = None
         self.update()
 
     def stop_and_wait(self, timeout_ms: int = 1500) -> None:
@@ -211,6 +254,7 @@ class CameraTile(QWidget):
             worker.stop()
         self._worker = None
         self._thread = None
+        self._teardown_vlc_widget()
         self._stop_audio()
         self._status = "idle"
         if thread is not None:
@@ -220,6 +264,28 @@ class CameraTile(QWidget):
                 # the C++ QThread out from under it — bury it instead so
                 # Qt's deleteLater chain (or app shutdown) handles it.
                 _bury_running_thread(worker, thread)
+
+    def _teardown_vlc_widget(self) -> None:
+        if self._vlc_widget is None:
+            return
+        widget = self._vlc_widget
+        self._vlc_widget = None
+        for sig, slot in (
+            (widget.status_changed, self._on_status),
+            (widget.error, self._on_error),
+            (widget.first_frame, self._on_vlc_first_frame),
+        ):
+            try:
+                sig.disconnect(slot)
+            except (TypeError, RuntimeError):
+                pass
+        try:
+            widget.shutdown()
+        except Exception:
+            pass
+        widget.hide()
+        widget.setParent(None)
+        widget.deleteLater()
 
     def reset_zoom(self) -> None:
         self._zoom = 1.0
@@ -243,7 +309,22 @@ class CameraTile(QWidget):
         if new_mode == self._hw_accel:
             return
         self._hw_accel = new_mode
-        if self._thread is not None:
+        if self._vlc_widget is not None:
+            self._vlc_widget.set_hw_accel(new_mode)
+        elif self._thread is not None:
+            self.stop()
+            self.start()
+
+    def set_playback_backend(self, backend: str) -> None:
+        """Switch playback engine. Always forces a full teardown-and-restart
+        because the widget hierarchy differs between the frame-based
+        backends (opencv/ffmpeg) and the native VLC embed."""
+        new_backend = (backend or "opencv").lower()
+        if new_backend == self._playback_backend:
+            return
+        was_running = self._thread is not None or self._vlc_widget is not None
+        self._playback_backend = new_backend
+        if was_running:
             self.stop()
             self.start()
 
@@ -256,7 +337,8 @@ class CameraTile(QWidget):
         old_url = self.camera.rtsp_url if self.camera else ""
         old_audio = self.camera.audio_enabled if self.camera else False
         self.camera = camera
-        if self._worker is not None and old_url != camera.rtsp_url:
+        url_changed = old_url != camera.rtsp_url
+        if url_changed and (self._worker is not None or self._vlc_widget is not None):
             # Force a reconnect with the new URL. stop()/start() are
             # non-blocking now, so this is safe on the UI thread.
             self.stop()
@@ -268,7 +350,8 @@ class CameraTile(QWidget):
     # -- audio --
 
     def _apply_audio_state(self) -> None:
-        if self.camera.audio_enabled and self._worker is not None:
+        has_stream = self._worker is not None or self._vlc_widget is not None
+        if self.camera.audio_enabled and has_stream:
             self._start_audio()
         else:
             self._stop_audio()
@@ -390,6 +473,19 @@ class CameraTile(QWidget):
     def _on_error(self, message: str) -> None:
         self._last_error = message
 
+    def _on_vlc_first_frame(self) -> None:
+        if not self._emitted_first_frame:
+            self._emitted_first_frame = True
+            self.first_frame.emit(self.camera.id)
+        # No pixmap to paint — VLC writes straight to the child HWND —
+        # but we still repaint so the placeholder text disappears.
+        self.update()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._vlc_widget is not None:
+            self._vlc_widget.setGeometry(self._vlc_child_rect())
+
     # -- painting --
 
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
@@ -414,12 +510,19 @@ class CameraTile(QWidget):
 
         painter.setClipPath(self._rounded_path(rect, inner_radius))
 
-        if self._pixmap is not None and not self._pixmap.isNull():
+        if self._vlc_widget is not None:
+            # VLC paints straight to the child native HWND — anything we
+            # draw here would either be covered by the native surface
+            # (Windows/macOS) or flicker against it (Linux). Fill the
+            # backdrop black so the placeholder text goes away as soon as
+            # the child widget is shown.
+            painter.fillRect(rect, QColor("#000000"))
+        elif self._pixmap is not None and not self._pixmap.isNull():
             self._draw_video(painter, rect)
         else:
             self._draw_placeholder(painter, rect)
 
-        if self._show_overlay:
+        if self._show_overlay and self._vlc_widget is None:
             # Draw the overlay while still clipped so the chip can never
             # extend past the rounded corners.
             self._draw_overlay(painter, rect)

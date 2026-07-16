@@ -143,6 +143,7 @@ class CameraGrid(QWidget):
                     reconnect_delay=self._settings.reconnect_delay,
                     show_overlay=self._settings.show_overlay,
                     hw_accel=self._settings.hw_accel,
+                    playback_backend=self._settings.playback_backend,
                 )
                 tile.clicked.connect(self._on_tile_clicked)
                 tile.double_clicked.connect(self._on_tile_double_clicked)
@@ -168,6 +169,10 @@ class CameraGrid(QWidget):
         for tile in self._tiles.values():
             tile.set_show_overlay(settings.show_overlay)
             tile.set_target_fps(settings.target_fps)
+            # Switch the playback engine *before* the HW-accel mode: the
+            # engine change may restart the tile, and doing hw_accel first
+            # would waste that restart.
+            tile.set_playback_backend(settings.playback_backend)
             tile.set_hw_accel(settings.hw_accel)
         self._grid_host.set_columns(settings.grid_columns)
         self._refresh_layout()

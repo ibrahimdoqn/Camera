@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
 import sys
 import time
 from typing import Optional
@@ -23,6 +24,10 @@ from typing import Optional
 import cv2
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
+
+
+# Avoid flashing a console window when running as a windowed Windows .exe.
+_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 # Map a user-friendly hw-accel name (the same labels exposed in Settings) to
@@ -36,11 +41,46 @@ _HW_ACCEL_MAP: dict[str, tuple[int, str]] = {
     "cuda":    (1, "cuda"),     # NVDEC via FFmpeg (NVIDIA GPUs)
     "d3d11va": (2, "d3d11va"),  # VIDEO_ACCELERATION_D3D11 (Windows DXVA 2.0)
     "dxva2":   (1, "dxva2"),    # FFmpeg-side DXVA2; OpenCV maps to ANY
+    "qsv":     (1, "qsv"),      # Intel Quick Sync (integrated GPUs)
 }
 
 
 # A sensible default order for the dropdown when every mode is supported.
-ALL_HW_ACCEL_MODES: tuple[str, ...] = ("auto", "none", "d3d11va", "dxva2", "cuda")
+ALL_HW_ACCEL_MODES: tuple[str, ...] = ("auto", "none", "d3d11va", "dxva2", "cuda", "qsv")
+
+
+# ---- Playback backend registry --------------------------------------------
+# ``opencv`` is always available (opencv-python is a hard requirement).
+# ``ffmpeg`` requires ``ffmpeg`` + ``ffprobe`` on PATH.
+# ``vlc``    requires the ``python-vlc`` module *and* a libvlc shared library
+#            reachable at import time.
+ALL_PLAYBACK_BACKENDS: tuple[str, ...] = ("opencv", "ffmpeg", "vlc")
+
+
+def _has_ffmpeg_binary() -> bool:
+    return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+
+def _has_vlc_module() -> bool:
+    try:
+        import vlc  # type: ignore  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+def detect_supported_backends() -> list[str]:
+    """Return which playback engines can actually run on this machine.
+
+    ``opencv`` is always present. ``ffmpeg`` needs the system binaries.
+    ``vlc`` needs python-vlc + a working libvlc.
+    """
+    backends: list[str] = ["opencv"]
+    if _has_ffmpeg_binary():
+        backends.append("ffmpeg")
+    if _has_vlc_module():
+        backends.append("vlc")
+    return backends
 
 
 def _resolve_hw_accel(name: str) -> tuple[int, str]:
@@ -281,6 +321,245 @@ class StreamWorker(QObject):
 
         self.status_changed.emit("offline")
         self.finished.emit()
+
+    def _sleep_interruptible(self, seconds: float) -> None:
+        end = time.monotonic() + seconds
+        while self._running and time.monotonic() < end:
+            time.sleep(0.1)
+
+
+# ---- FFmpeg subprocess backend --------------------------------------------
+#
+# The bundled OpenCV FFmpeg cannot always negotiate the requested hardware
+# path — the user's report ("only d3d11va works") is a direct symptom.
+# Shelling out to the system's ``ffmpeg`` gives us direct access to the
+# native ``-hwaccel`` flag, which is the codec-team-blessed way to route a
+# decode through the GPU. We probe dimensions with ``ffprobe`` up front so
+# the raw-video pipe protocol is unambiguous, then read tightly packed BGR24
+# frames off stdout.
+
+
+def _probe_stream_dims(url: str, timeout: float = 8.0) -> Optional[tuple[int, int]]:
+    """Return (width, height) for the primary video track, or ``None``."""
+    probe = shutil.which("ffprobe")
+    if probe is None:
+        return None
+    cmd = [
+        probe,
+        "-v", "error",
+        "-rtsp_transport", "tcp",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        url,
+    ]
+    try:
+        out = subprocess.check_output(
+            cmd,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            creationflags=_NO_WINDOW,
+        ).decode("ascii", errors="ignore").strip()
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if not out or "x" not in out:
+        return None
+    try:
+        w_str, h_str = out.splitlines()[0].split("x")[:2]
+        w, h = int(w_str), int(h_str)
+    except ValueError:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return w, h
+
+
+def _ffmpeg_command(url: str, hw_accel: str) -> list[str]:
+    """Build the ffmpeg CLI for a raw-video BGR24 pipe."""
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    cmd: list[str] = [
+        ffmpeg,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-rtsp_transport", "tcp",
+        "-stimeout", "5000000",
+    ]
+    _, ffmpeg_name = _resolve_hw_accel(hw_accel)
+    if ffmpeg_name:
+        # ``-hwaccel`` decodes on the GPU. We deliberately omit
+        # ``-hwaccel_output_format`` so ffmpeg transfers the frames back to
+        # system memory as normal software surfaces — the pipe below expects
+        # BGR24 in RAM. The GPU still absorbs the codec work, which is where
+        # the real CPU savings come from.
+        cmd += ["-hwaccel", ffmpeg_name]
+    cmd += [
+        "-i", url,
+        "-an",
+        "-sn",
+        "-vf", "format=bgr24",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-",
+    ]
+    return cmd
+
+
+def _read_exact(pipe, n: int) -> Optional[bytes]:
+    """Read exactly ``n`` bytes from ``pipe`` or return ``None`` on EOF."""
+    buf = bytearray()
+    remaining = n
+    while remaining > 0:
+        chunk = pipe.read(remaining)
+        if not chunk:
+            return None
+        buf.extend(chunk)
+        remaining -= len(chunk)
+    return bytes(buf)
+
+
+class FFmpegSubprocessWorker(QObject):
+    """Subprocess-based worker that uses the system ``ffmpeg`` binary.
+
+    Behaviour and signals mirror :class:`StreamWorker` so the two backends
+    are hot-swappable inside :class:`~app.camera_tile.CameraTile`.
+    """
+
+    frame_ready = pyqtSignal(np.ndarray)
+    status_changed = pyqtSignal(str)
+    error = pyqtSignal(str)
+    finished = pyqtSignal()
+
+    def __init__(self, url: str, target_fps: int = 20,
+                 reconnect_delay: float = 3.0,
+                 hw_accel: str = "auto") -> None:
+        super().__init__()
+        self._url = url
+        self._target_fps = max(1, int(target_fps))
+        self._reconnect_delay = reconnect_delay
+        self._hw_accel = hw_accel or "auto"
+        self._hw_accel_failed = False
+        self._running = False
+
+    def update_url(self, url: str) -> None:
+        self._url = url
+
+    def update_target_fps(self, fps: int) -> None:
+        self._target_fps = max(1, int(fps))
+
+    def update_hw_accel(self, hw_accel: str) -> None:
+        self._hw_accel = hw_accel or "auto"
+        self._hw_accel_failed = False
+
+    def stop(self) -> None:
+        self._running = False
+
+    def _effective_hw_accel(self) -> str:
+        if self._hw_accel_failed and self._hw_accel != "none":
+            return "none"
+        return self._hw_accel
+
+    def _spawn(self, hw_accel: str, width: int, height: int) -> Optional[subprocess.Popen]:
+        cmd = _ffmpeg_command(self._url, hw_accel)
+        try:
+            return subprocess.Popen(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                creationflags=_NO_WINDOW,
+                bufsize=width * height * 3 * 2,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.error.emit(f"ffmpeg başlatılamadı: {exc}")
+            return None
+
+    def run(self) -> None:
+        self._running = True
+
+        while self._running:
+            hw_to_try = self._effective_hw_accel()
+            self.status_changed.emit("connecting")
+
+            dims = _probe_stream_dims(self._url)
+            if dims is None:
+                self.error.emit("Akış boyutları alınamadı")
+                self.status_changed.emit("offline")
+                self._sleep_interruptible(self._reconnect_delay)
+                continue
+            width, height = dims
+            frame_bytes = width * height * 3
+
+            proc = self._spawn(hw_to_try, width, height)
+            if proc is None or proc.stdout is None:
+                self.status_changed.emit("offline")
+                self._sleep_interruptible(self._reconnect_delay)
+                continue
+
+            self.status_changed.emit("online")
+            connection_start = time.monotonic()
+            last_emit = 0.0
+            first_frame_received = False
+            hw_fallback_armed = (hw_to_try != "none")
+
+            try:
+                while self._running:
+                    payload = _read_exact(proc.stdout, frame_bytes)
+                    now = time.monotonic()
+
+                    if payload is None:
+                        # EOF or read error. Distinguish "hw accel never
+                        # produced a frame" from "stream ended cleanly".
+                        if (hw_fallback_armed
+                                and not first_frame_received
+                                and now - connection_start > HWACCEL_PROBE_S):
+                            self._hw_accel_failed = True
+                            self.error.emit(
+                                f"HW hızlandırma '{hw_to_try}' çalışmıyor — "
+                                f"CPU dekodlamaya geçiliyor"
+                            )
+                        break
+
+                    first_frame_received = True
+                    frame = np.frombuffer(payload, dtype=np.uint8).reshape(
+                        (height, width, 3)
+                    )
+
+                    interval = 1.0 / max(1, self._target_fps)
+                    if now - last_emit >= interval:
+                        last_emit = now
+                        # Copy so downstream code isn't reading from a numpy
+                        # view of a buffer we're about to overwrite.
+                        self.frame_ready.emit(frame.copy())
+            finally:
+                self._terminate(proc)
+
+            if self._running:
+                self.status_changed.emit("offline")
+                self._sleep_interruptible(self._reconnect_delay)
+
+        self.status_changed.emit("offline")
+        self.finished.emit()
+
+    @staticmethod
+    def _terminate(proc: subprocess.Popen) -> None:
+        try:
+            proc.terminate()
+        except (OSError, ProcessLookupError):
+            return
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                pass
 
     def _sleep_interruptible(self, seconds: float) -> None:
         end = time.monotonic() + seconds

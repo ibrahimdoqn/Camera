@@ -21,7 +21,16 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import Camera, Settings
-from .stream_worker import detect_supported_hw_accels
+from .stream_worker import detect_supported_backends, detect_supported_hw_accels
+
+
+# Human-readable labels for the playback backend combo. The internal id
+# stays lowercase because that's what the tile checks.
+_BACKEND_LABELS: dict[str, str] = {
+    "opencv": "OpenCV / FFmpeg (varsayılan)",
+    "ffmpeg": "Harici FFmpeg (native HW hızlandırma)",
+    "vlc":    "VLC (native pencere, en verimli)",
+}
 
 
 class CameraDialog(QDialog):
@@ -204,6 +213,23 @@ class SettingsDialog(QDialog):
         if idx >= 0:
             self.hw_combo.setCurrentIndex(idx)
 
+        # Playback engine (OpenCV vs external FFmpeg vs libVLC). We only
+        # list backends that can actually run on this machine — for
+        # ffmpeg / vlc that means the binary or python-vlc module has to
+        # be reachable. If the persisted setting refers to a backend
+        # that's since become unavailable, we keep it in the list so the
+        # user isn't silently forced to a different engine.
+        self.backend_combo = QComboBox()
+        available = list(detect_supported_backends())
+        if settings.playback_backend and settings.playback_backend not in available:
+            available.append(settings.playback_backend)
+        for backend in available:
+            label = _BACKEND_LABELS.get(backend, backend)
+            self.backend_combo.addItem(label, backend)
+        idx = self.backend_combo.findData(settings.playback_backend)
+        if idx >= 0:
+            self.backend_combo.setCurrentIndex(idx)
+
         self.overlay_check = QCheckBox("Kamera adı ve durum rozetini göster")
         self.overlay_check.setChecked(settings.show_overlay)
 
@@ -233,6 +259,7 @@ class SettingsDialog(QDialog):
         form.addRow("Sütun sayısı", self.grid_spin)
         form.addRow("Hedef FPS", self.fps_spin)
         form.addRow("Yeniden bağlanma", self.reconnect_spin)
+        form.addRow("Oynatma motoru", self.backend_combo)
         form.addRow("HW hızlandırma", self.hw_combo)
         form.addRow("", self.overlay_check)
 
@@ -271,10 +298,12 @@ class SettingsDialog(QDialog):
         self.log_level_combo.setEnabled(self.logging_check.isChecked())
 
     def result_settings(self) -> Settings:
+        backend = self.backend_combo.currentData() or "opencv"
         return Settings(
             grid_columns=self.grid_spin.value(),
             target_fps=self.fps_spin.value(),
             hw_accel=self.hw_combo.currentText(),
+            playback_backend=str(backend),
             reconnect_delay=float(self.reconnect_spin.value()),
             show_overlay=self.overlay_check.isChecked(),
             logging_enabled=self.logging_check.isChecked(),
