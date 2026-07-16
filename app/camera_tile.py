@@ -102,14 +102,13 @@ class CameraTile(QWidget):
     status_changed = pyqtSignal(str, str)  # camera_id, status
 
     def __init__(self, camera: Camera, target_fps: int = 20, reconnect_delay: float = 3.0,
-                 show_overlay: bool = True, hw_accel: str = "auto",
+                 show_overlay: bool = True,
                  parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.camera = camera
         self._target_fps = target_fps
         self._reconnect_delay = reconnect_delay
         self._show_overlay = show_overlay
-        self._hw_accel = hw_accel or "auto"
         self._selected = False
 
         self._pixmap: Optional[QPixmap] = None
@@ -149,7 +148,6 @@ class CameraTile(QWidget):
             url=self.camera.rtsp_url,
             target_fps=self._target_fps,
             reconnect_delay=self._reconnect_delay,
-            hw_accel=self._hw_accel,
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
@@ -242,22 +240,6 @@ class CameraTile(QWidget):
         self._target_fps = max(1, int(fps))
         if self._worker is not None:
             self._worker.update_target_fps(self._target_fps)
-
-    def set_hw_accel(self, hw_accel: str) -> None:
-        """Change the hardware-decoding mode.
-
-        libVLC picks the codec + decoder path when the ``vlc.Instance`` is
-        constructed, so switching modes requires a fresh worker. The
-        stop/start cycle is non-blocking (see :meth:`stop`) so this is
-        safe to call from Settings.
-        """
-        new_mode = hw_accel or "auto"
-        if new_mode == self._hw_accel:
-            return
-        self._hw_accel = new_mode
-        if self._thread is not None:
-            self.stop()
-            self.start()
 
     def set_selected(self, value: bool) -> None:
         if self._selected != value:

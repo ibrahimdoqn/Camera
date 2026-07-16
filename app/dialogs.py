@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
 )
 
 from .config import Camera, Settings
-from .stream_worker import detect_supported_hw_accels
 
 
 class CameraDialog(QDialog):
@@ -185,25 +184,6 @@ class SettingsDialog(QDialog):
         self.reconnect_spin.setValue(int(settings.reconnect_delay))
         self.reconnect_spin.setSuffix(" sn")
 
-        # Only expose hardware acceleration modes that the current platform
-        # could plausibly run. Showing ``cuda`` on a non-NVIDIA GPU or
-        # ``d3d11va`` on Linux just leaves users staring at black tiles,
-        # because FFmpeg quietly falls through to a path that produces no
-        # frames. ``auto`` and ``none`` are always present. If the user's
-        # saved setting refers to a now-unavailable mode (e.g. they moved
-        # config files between machines), we add it back so the dropdown
-        # still reflects what's actually persisted instead of silently
-        # rewriting it.
-        self.hw_combo = QComboBox()
-        supported = list(detect_supported_hw_accels())
-        if settings.hw_accel and settings.hw_accel not in supported:
-            supported.append(settings.hw_accel)
-        for opt in supported:
-            self.hw_combo.addItem(opt)
-        idx = self.hw_combo.findText(settings.hw_accel)
-        if idx >= 0:
-            self.hw_combo.setCurrentIndex(idx)
-
         self.overlay_check = QCheckBox("Kamera adı ve durum rozetini göster")
         self.overlay_check.setChecked(settings.show_overlay)
 
@@ -233,7 +213,6 @@ class SettingsDialog(QDialog):
         form.addRow("Sütun sayısı", self.grid_spin)
         form.addRow("Hedef FPS", self.fps_spin)
         form.addRow("Yeniden bağlanma", self.reconnect_spin)
-        form.addRow("HW hızlandırma", self.hw_combo)
         form.addRow("", self.overlay_check)
 
         diag_title = QLabel("Tanılama")
@@ -274,7 +253,6 @@ class SettingsDialog(QDialog):
         return Settings(
             grid_columns=self.grid_spin.value(),
             target_fps=self.fps_spin.value(),
-            hw_accel=self.hw_combo.currentText(),
             reconnect_delay=float(self.reconnect_spin.value()),
             show_overlay=self.overlay_check.isChecked(),
             logging_enabled=self.logging_check.isChecked(),

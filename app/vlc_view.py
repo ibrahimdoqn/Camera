@@ -1,10 +1,16 @@
-"""libVLC-based RTSP worker with hardware-accelerated decode.
+"""libVLC-based RTSP worker.
 
-libVLC is the sole video decoder for the app. It's chosen because VLC
-routes decode through the platform's hardware path automatically — DXVA2
-and D3D11 on Windows, VAAPI on Linux, VideoToolbox on macOS — and its
-RTSP client is significantly more reliable than the FFmpeg build that
-ships inside ``opencv-python``.
+libVLC is the sole video decoder for the app. It's chosen because VLC:
+
+* Has a robust RTSP client.
+* **Enables hardware-accelerated decode automatically** — its default
+  ``avcodec-hw`` value is ``any``, which probes every hardware driver
+  the platform exposes (DXVA2 / D3D11 on Windows, VAAPI on Linux,
+  VideoToolbox on macOS, NVDEC on NVIDIA GPUs, Quick Sync on Intel
+  iGPUs) and settles on the first driver that succeeds. If nothing
+  works, VLC transparently falls back to software decoding. There is
+  no user setting to configure — that was the whole point of moving
+  off OpenCV / FFmpeg.
 
 Rather than embedding VLC's native output surface into a widget (which
 would break the zoom / pan / overlay features), we install VLC's
@@ -16,13 +22,11 @@ overlay chip and cursor-anchored zoom.
 
 Signals ``frame_ready`` / ``status_changed`` / ``error`` / ``finished``
 mirror the old ``StreamWorker`` contract exactly so :class:`CameraTile`
-consumes both the same way.
+consumes them the same way.
 """
 from __future__ import annotations
 
 import ctypes
-import shutil
-import sys
 import time
 from typing import Optional
 
@@ -62,65 +66,12 @@ _VLC_VideoUnlockCb = ctypes.CFUNCTYPE(
 _VLC_VideoDisplayCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
 
 
-# --- HW-accel handling -----------------------------------------------------
-#
-# The Settings dialog exposes the same labels the old StreamWorker used, so
-# saved configs migrate cleanly. Each label maps to the value libVLC wants
-# for ``--avcodec-hw``. ``auto`` (aka ``None``) lets VLC pick, which is the
-# recommended default — VLC's ``any`` path probes DXVA2 → D3D11 → software
-# and settles on the first driver that succeeds.
-_HW_ACCEL_TO_VLC: dict[str, Optional[str]] = {
-    "auto":    None,
-    "none":    "none",
-    "d3d11va": "d3d11va",
-    "dxva2":   "dxva2",
-    "cuda":    "nvdec",   # VLC's option name for NVIDIA NVDEC
-    "qsv":     "qsv",
-}
-
-
-ALL_HW_ACCEL_MODES: tuple[str, ...] = (
-    "auto", "none", "d3d11va", "dxva2", "cuda", "qsv",
-)
-
-
-def _has_nvidia_gpu() -> bool:
-    """Best-effort check for an NVIDIA GPU; gates the CUDA/NVDEC option."""
-    if shutil.which("nvidia-smi") is not None:
-        return True
-    try:
-        import cv2  # type: ignore
-    except ImportError:
-        return False
-    try:
-        return cv2.cuda.getCudaEnabledDeviceCount() > 0  # type: ignore[attr-defined]
-    except (AttributeError, cv2.error):  # pragma: no cover - defensive
-        return False
-
-
-def detect_supported_hw_accels() -> list[str]:
-    """Modes that plausibly work on this machine (populates the dropdown)."""
-    modes: list[str] = ["auto", "none"]
-    if sys.platform.startswith("win"):
-        modes.extend(["d3d11va", "dxva2"])
-    if _has_nvidia_gpu():
-        modes.append("cuda")
-    # Quick Sync is available on any recent Intel CPU with integrated
-    # graphics; we can't detect that reliably at runtime without heavier
-    # dependencies, so we always list it and let the runtime probe fall
-    # back if the driver is missing.
-    if sys.platform.startswith("win"):
-        modes.append("qsv")
-    return modes
-
-
-def _vlc_hw_option(hw_accel: str) -> Optional[str]:
-    return _HW_ACCEL_TO_VLC.get((hw_accel or "auto").lower())
-
-
 # --- Watchdog timings ------------------------------------------------------
-_HWACCEL_PROBE_S = 6.0   # first frame must arrive in this many seconds
-_WATCHDOG_NO_FRAME_S = 8.0  # or a working stream is treated as dead
+# If a fresh connection produces no frame for this long, tear it down and
+# reconnect. Same threshold as the previous StreamWorker so behaviour is
+# unchanged.
+_FIRST_FRAME_TIMEOUT_S = 8.0
+_ONGOING_FRAME_TIMEOUT_S = 8.0
 
 
 class VLCFrameWorker(QObject):
@@ -136,14 +87,11 @@ class VLCFrameWorker(QObject):
     finished = pyqtSignal()
 
     def __init__(self, url: str, target_fps: int = 20,
-                 reconnect_delay: float = 3.0,
-                 hw_accel: str = "auto") -> None:
+                 reconnect_delay: float = 3.0) -> None:
         super().__init__()
         self._url = url
         self._target_fps = max(1, int(target_fps))
         self._reconnect_delay = reconnect_delay
-        self._hw_accel = hw_accel or "auto"
-        self._hw_accel_failed = False
         self._running = False
 
         # libVLC handles; owned by the run loop.
@@ -152,8 +100,11 @@ class VLCFrameWorker(QObject):
         self._media = None
 
         # Frame buffer VLC decodes into. Allocated in ``format_cb``.
+        # ``_buf_addr`` is the integer address ctypes will hand to
+        # libvlc — using a plain int (not a c_void_p wrapper) avoids
+        # "cannot be converted to pointer" errors on Windows.
         self._buf = None
-        self._buf_ptr = ctypes.c_void_p(0)
+        self._buf_addr: int = 0
         self._width = 0
         self._height = 0
 
@@ -179,19 +130,10 @@ class VLCFrameWorker(QObject):
     def update_target_fps(self, fps: int) -> None:
         self._target_fps = max(1, int(fps))
 
-    def update_hw_accel(self, hw_accel: str) -> None:
-        self._hw_accel = hw_accel or "auto"
-        self._hw_accel_failed = False
-
     def stop(self) -> None:
         self._running = False
 
     # -- worker loop -------------------------------------------------------
-
-    def _effective_hw_accel(self) -> str:
-        if self._hw_accel_failed and self._hw_accel != "none":
-            return "none"
-        return self._hw_accel
 
     def run(self) -> None:
         self._running = True
@@ -208,21 +150,15 @@ class VLCFrameWorker(QObject):
             return
 
         while self._running:
-            hw_to_try = self._effective_hw_accel()
             self.status_changed.emit("connecting")
 
-            if not self._start_player(hw_to_try):
+            if not self._start_player():
                 self._sleep_interruptible(self._reconnect_delay)
                 continue
 
             # Block here until the stream fails, ends, or stop() is called.
-            terminated_by_hw_failure = self._wait_until_terminated(hw_to_try)
+            self._wait_until_terminated()
             self._stop_player()
-
-            if terminated_by_hw_failure:
-                # Loop immediately with the CPU fallback; no offline blink.
-                self._hw_accel_failed = True
-                continue
 
             if self._running:
                 self.status_changed.emit("offline")
@@ -233,7 +169,7 @@ class VLCFrameWorker(QObject):
 
     # -- libVLC lifecycle --------------------------------------------------
 
-    def _start_player(self, hw_accel: str) -> bool:
+    def _start_player(self) -> bool:
         import vlc  # type: ignore
 
         # Keep the vlc.Instance itself lean — different libVLC point
@@ -259,26 +195,18 @@ class VLCFrameWorker(QObject):
             self._media = self._instance.media_new(self._url)
 
             # Per-media options survive better across libVLC builds and
-            # apply cleanly to just this stream. They cover:
-            #   * ``rtsp-tcp``          — force TCP transport, no UDP loss
-            #   * ``network-caching``   — target buffer (ms) for network
-            #                              streams; 300 ms is the low-
-            #                              latency VLC recommendation
-            #   * ``live-caching``      — same, for live sources
-            #   * ``clock-jitter=0``    — disables adaptive playback rate
-            #   * ``no-audio``          — belt-and-braces, we don't want
-            #                              audio from the video worker
-            #   * ``avcodec-hw=<mode>`` — the hardware-decode path
+            # apply cleanly to just this stream. Notably we do NOT pass
+            # ``:avcodec-hw=<mode>`` — VLC's default is ``any``, which
+            # picks the best available hardware decoder on its own (DXVA2
+            # / D3D11 / NVDEC / Quick Sync / VAAPI / …) and cleanly falls
+            # back to software if none of them work.
             media_opts = [
-                ":rtsp-tcp",
-                ":network-caching=300",
+                ":rtsp-tcp",             # avoid UDP loss on noisy Wi-Fi
+                ":network-caching=300",  # 300 ms is VLC's low-latency default
                 ":live-caching=300",
                 ":clock-jitter=0",
-                ":no-audio",
+                ":no-audio",             # belt-and-braces
             ]
-            vlc_hw = _vlc_hw_option(hw_accel)
-            if vlc_hw is not None:
-                media_opts.append(f":avcodec-hw={vlc_hw}")
             for opt in media_opts:
                 self._media.add_option(opt)
 
@@ -295,7 +223,7 @@ class VLCFrameWorker(QObject):
         self._last_frame_ts = 0.0
         self._connect_started = time.monotonic()
         self._buf = None
-        self._buf_ptr = ctypes.c_void_p(0)
+        self._buf_addr = 0
         self._width = 0
         self._height = 0
 
@@ -319,18 +247,20 @@ class VLCFrameWorker(QObject):
                 h = int(h_ptr[0])
                 if w <= 0 or h <= 0:
                     return 0
-                # RV32 on little-endian x86 is packed BGRA in memory, which
-                # is a perfect match for QImage.Format_ARGB32 on the paint
-                # side. That saves a channel swap in the tile.
-                fourcc = b"RV32"
-                for i in range(4):
-                    chroma[i] = fourcc[i:i + 1]
+                # RV32 on little-endian x86 is packed BGRA in memory,
+                # which is a perfect match for QImage.Format_ARGB32 on
+                # the paint side. That saves a channel swap in the tile.
+                # memmove is the cleanest way to write into the char*
+                # buffer libvlc handed us.
+                ctypes.memmove(chroma, b"RV32", 4)
                 pitches[0] = w * 4
                 lines[0] = h
                 size = w * h * 4
-                # Allocate a page-aligned-ish buffer VLC will decode into.
+                # Allocate the buffer VLC will decode into. Store the
+                # raw integer address alongside — libvlc's lock callback
+                # expects a plain integer pointer, not a ctypes wrapper.
                 self._buf = (ctypes.c_ubyte * size)()
-                self._buf_ptr = ctypes.c_void_p(ctypes.addressof(self._buf))
+                self._buf_addr = ctypes.addressof(self._buf)
                 self._width = w
                 self._height = h
                 return 1
@@ -339,14 +269,18 @@ class VLCFrameWorker(QObject):
 
         def cleanup_cb(opaque):
             self._buf = None
-            self._buf_ptr = ctypes.c_void_p(0)
+            self._buf_addr = 0
             self._width = 0
             self._height = 0
 
-        # -- lock: tell VLC where to write the next frame
+        # -- lock: tell VLC where to write the next frame.
+        # The callback's declared return type is c_void_p; ctypes requires
+        # either an int or None, so we return the buffer address as an int
+        # (not a c_void_p wrapper) and let ctypes cast it for us.
         def lock_cb(opaque, planes):
-            planes[0] = self._buf_ptr
-            return ctypes.c_void_p(0)
+            addr = self._buf_addr
+            planes[0] = addr
+            return addr
 
         # -- unlock: VLC has finished writing → snapshot to numpy + emit.
         # VLC does not decode the next frame until display_cb has returned,
@@ -398,17 +332,10 @@ class VLCFrameWorker(QObject):
             return
         self.frame_ready.emit(frame)
 
-    def _wait_until_terminated(self, hw_to_try: str) -> bool:
-        """Block until the stream fails, ends, or ``stop()`` is called.
-
-        Returns ``True`` if the failure was diagnosed as "the requested
-        HW-accel path never produced a frame" — the caller uses that to
-        re-enter the loop with the software fallback without a visible
-        offline blink.
-        """
+    def _wait_until_terminated(self) -> None:
+        """Block until the stream fails, ends, or ``stop()`` is called."""
         import vlc  # type: ignore
 
-        hw_probe_armed = hw_to_try != "none"
         while self._running:
             time.sleep(0.15)
             try:
@@ -418,34 +345,19 @@ class VLCFrameWorker(QObject):
             now = time.monotonic()
 
             if state in (vlc.State.Error, vlc.State.Ended):
-                if (hw_probe_armed
-                        and not self._first_frame_seen
-                        and now - self._connect_started > _HWACCEL_PROBE_S):
-                    self.error.emit(
-                        f"HW hızlandırma '{hw_to_try}' çalışmıyor — "
-                        f"CPU dekodlamaya geçiliyor"
-                    )
-                    return True
-                return False
+                return
 
-            # HW-accel probe: no first frame within N seconds → treat as
-            # broken and switch to CPU. The user will see connecting →
-            # offline → connecting → online instead of a black tile.
-            if (hw_probe_armed
-                    and not self._first_frame_seen
-                    and now - self._connect_started > _HWACCEL_PROBE_S):
-                self.error.emit(
-                    f"HW hızlandırma '{hw_to_try}' çalışmıyor — "
-                    f"CPU dekodlamaya geçiliyor"
-                )
-                return True
+            # First-frame watchdog: no video ever arrived → give up and
+            # let the outer loop reconnect.
+            if (not self._first_frame_seen
+                    and now - self._connect_started > _FIRST_FRAME_TIMEOUT_S):
+                return
 
-            # Watchdog: previously-online stream stopped delivering frames.
+            # Ongoing watchdog: previously-online stream stopped delivering
+            # frames.
             if (self._first_frame_seen
-                    and now - self._last_frame_ts > _WATCHDOG_NO_FRAME_S):
-                return False
-
-        return False
+                    and now - self._last_frame_ts > _ONGOING_FRAME_TIMEOUT_S):
+                return
 
     def _stop_player(self) -> None:
         """Tear down the libVLC objects.
@@ -462,7 +374,7 @@ class VLCFrameWorker(QObject):
         self._media = None
         self._instance = None
         self._buf = None
-        self._buf_ptr = ctypes.c_void_p(0)
+        self._buf_addr = 0
         self._width = 0
         self._height = 0
         if player is not None:

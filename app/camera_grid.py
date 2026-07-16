@@ -142,7 +142,6 @@ class CameraGrid(QWidget):
                     target_fps=self._settings.target_fps,
                     reconnect_delay=self._settings.reconnect_delay,
                     show_overlay=self._settings.show_overlay,
-                    hw_accel=self._settings.hw_accel,
                 )
                 tile.clicked.connect(self._on_tile_clicked)
                 tile.double_clicked.connect(self._on_tile_double_clicked)
@@ -168,7 +167,6 @@ class CameraGrid(QWidget):
         for tile in self._tiles.values():
             tile.set_show_overlay(settings.show_overlay)
             tile.set_target_fps(settings.target_fps)
-            tile.set_hw_accel(settings.hw_accel)
         self._grid_host.set_columns(settings.grid_columns)
         self._refresh_layout()
 
