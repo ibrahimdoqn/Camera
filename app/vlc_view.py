@@ -27,11 +27,17 @@ consumes them the same way.
 from __future__ import annotations
 
 import ctypes
+import os
 import time
 from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from .logger import get_logger
+
+
+_log = get_logger("vlc")
 
 
 # --- libVLC callback signatures --------------------------------------------
@@ -64,6 +70,48 @@ _VLC_VideoUnlockCb = ctypes.CFUNCTYPE(
     ctypes.POINTER(ctypes.c_void_p),
 )
 _VLC_VideoDisplayCb = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p)
+
+
+# libVLC log callback: ``void log_cb(void *data, int level,
+# const libvlc_log_t *ctx, const char *fmt, va_list args)``. The
+# va_list is opaque to us — we can't format the placeholders in Python
+# without calling vsnprintf via ctypes (ABI-specific), so we log the
+# raw format template. It's still enough to tell "avcodec: using %s
+# hardware decoder" from "avcodec: no hardware acceleration".
+_VLC_LogCb = ctypes.CFUNCTYPE(
+    None,
+    ctypes.c_void_p,  # data
+    ctypes.c_int,     # level (0=DEBUG, 2=NOTICE, 3=WARNING, 4=ERROR)
+    ctypes.c_void_p,  # ctx (libvlc_log_t*)
+    ctypes.c_char_p,  # fmt
+    ctypes.c_void_p,  # args (va_list, opaque)
+)
+
+
+# Map libVLC's log levels onto Python's logging levels. libvlc uses:
+#   0 = DEBUG, 2 = NOTICE, 3 = WARNING, 4 = ERROR. (There's no 1.)
+# We deliberately clamp *everything* to DEBUG so the messages only
+# appear when the user explicitly enables DEBUG-level file logging via
+# Settings — otherwise the raw format strings (which we can't resolve
+# because va_list is opaque to ctypes) would be pure noise in stderr.
+# The important diagnostic messages (VLC's "Using D3D11VA for hardware
+# decoding" NOTICE for instance) still show up when DEBUG logging is
+# on, which is exactly when the user is investigating a problem.
+import logging as _stdlib_logging  # noqa: E402
+_LIBVLC_LEVEL_MAP = {
+    0: _stdlib_logging.DEBUG,
+    2: _stdlib_logging.DEBUG,
+    3: _stdlib_logging.DEBUG,
+    4: _stdlib_logging.DEBUG,
+}
+
+
+# Environment override to force libVLC's HW-accel path. Useful when
+# something's clearly wrong (e.g. NVDEC gauge stays at 0 and the log
+# says "avcodec: no hardware acceleration"). Values match libVLC's
+# ``avcodec-hw`` option: ``any`` (default), ``none``, ``nvdec``,
+# ``d3d11va``, ``dxva2``, ``vaapi``, …
+_HW_ACCEL_OVERRIDE = os.environ.get("TAPOVIEWER_VLC_HW", "").strip() or None
 
 
 # --- Watchdog timings ------------------------------------------------------
@@ -127,6 +175,7 @@ class VLCFrameWorker(QObject):
         self._cb_lock = None
         self._cb_unlock = None
         self._cb_display = None
+        self._cb_log = None
 
     # -- public control API ------------------------------------------------
 
@@ -213,19 +262,20 @@ class VLCFrameWorker(QObject):
             self._instance = vlc.Instance(*instance_args)
             if self._instance is None:
                 raise RuntimeError("vlc.Instance returned None")
-            # Silence libVLC + libavcodec log output. Without this the app
-            # spams the console with harmless swscaler warnings on every
-            # frame ("deprecated pixel format used, make sure you did set
-            # range correctly") — libavcodec emits those whenever the
-            # decoder's native YUV chroma is JPEG-range while swscale
-            # expects the range flag to be set separately. We can't fix
-            # the flag from Python, but we can drop the log noise.
-            # ``--quiet`` (an instance CLI arg) does not gate libavcodec's
-            # own av_log stream; ``log_unset`` does.
-            try:
-                self._instance.log_unset()
-            except Exception:
-                pass
+
+            # Route libVLC's log stream through a filter callback:
+            #   * Drop the "deprecated pixel format" / "swscaler" spam
+            #     that fires once per decoded frame. (--quiet at the
+            #     instance level does not gate libavcodec's own av_log
+            #     stream, so we need a callback to silence it.)
+            #   * Forward everything else to Python's logger at the
+            #     matching level. When the user turns file logging on in
+            #     Settings, they'll see exactly which decoder VLC picked
+            #     — e.g. "avcodec: Using D3D11VA for hardware decoding"
+            #     or "avcodec: no hardware acceleration available" —
+            #     which is the definitive answer to "is the GPU actually
+            #     being used?".
+            self._install_log_callback()
 
             self._player = self._instance.media_player_new()
             self._media = self._instance.media_new(self._url)
@@ -258,6 +308,12 @@ class VLCFrameWorker(QObject):
                 ":avcodec-threads=0",    # auto = one thread per CPU core
                 ":avcodec-fast",
                 ":avcodec-hurry-up",
+                # ``any`` is libVLC's default but we spell it out so it's
+                # obvious we're asking for hardware decode. The value can
+                # be overridden at runtime by setting the
+                # ``TAPOVIEWER_VLC_HW`` env var to e.g. ``nvdec`` (force
+                # NVIDIA) or ``d3d11va`` (force Windows DirectX 11).
+                f":avcodec-hw={_HW_ACCEL_OVERRIDE or 'any'}",
             ]
             for opt in media_opts:
                 self._media.add_option(opt)
@@ -288,6 +344,45 @@ class VLCFrameWorker(QObject):
             return False
 
         return True
+
+    def _install_log_callback(self) -> None:
+        """Filter libVLC's log stream into Python's logger.
+
+        This callback fires on VLC threads (potentially many concurrently
+        across cameras). Python's logging module is thread-safe so we
+        can log directly without extra synchronisation. We swallow the
+        one high-volume message ("deprecated pixel format used, make
+        sure you did set range correctly") because it's a benign
+        libavcodec swscale advisory that would otherwise fill the log
+        with a line every frame.
+        """
+        def log_cb(data, level, ctx, fmt, args):
+            if not fmt:
+                return
+            try:
+                msg = fmt.decode("utf-8", errors="replace") if isinstance(fmt, bytes) else str(fmt)
+            except Exception:
+                return
+            low = msg.lower()
+            if "deprecated pixel format" in low or "swscaler" in low:
+                return
+            py_level = _LIBVLC_LEVEL_MAP.get(int(level), _stdlib_logging.DEBUG)
+            # Format string may contain %s / %d placeholders that we
+            # can't resolve without vsnprintf, but even the template is
+            # diagnostic — "avcodec: Using %s for hardware decoding"
+            # already tells us HW-accel was attempted.
+            _log.log(py_level, "%s", msg)
+
+        self._cb_log = _VLC_LogCb(log_cb)
+        try:
+            self._instance.log_set(self._cb_log, None)
+        except Exception:
+            # Older libvlc builds may reject our callback signature.
+            # Fall back to log_unset so we don't spam the console.
+            try:
+                self._instance.log_unset()
+            except Exception:
+                pass
 
     def _install_callbacks(self) -> None:
         """Wire up VLC's format + video callback plumbing."""

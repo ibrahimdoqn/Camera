@@ -21,9 +21,19 @@ _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
 class _GpuProbe(QObject):
-    """Polls nvidia-smi off the UI thread; emits utilization (%)."""
+    """Polls nvidia-smi off the UI thread.
 
-    sample = pyqtSignal(float)  # NaN when unavailable
+    Emits (gpu, decoder) percentages. ``gpu`` is the shader/compute
+    engine — matches what Task Manager's "3D" graph shows. ``decoder``
+    is the NVDEC engine utilisation, i.e. the hardware video decoder
+    chip. NVDEC lives on a separate silicon block from the shaders,
+    so during pure playback ``gpu`` can sit near zero while ``decoder``
+    ticks up meaningfully — this is exactly how you can *see* that
+    hardware video decoding is active. Both are ``NaN`` when
+    ``nvidia-smi`` is not installed or the query fails.
+    """
+
+    sample = pyqtSignal(float, float)  # (gpu, decoder), NaN when unavailable
 
     def __init__(self, interval: float = 1.5) -> None:
         super().__init__()
@@ -37,30 +47,39 @@ class _GpuProbe(QObject):
     def run(self) -> None:
         self._running = True
         while self._running:
-            value = self._probe()
-            self.sample.emit(value)
+            gpu, dec = self._probe()
+            self.sample.emit(gpu, dec)
             end = time.monotonic() + self._interval
             while self._running and time.monotonic() < end:
                 time.sleep(0.1)
 
-    def _probe(self) -> float:
+    def _probe(self) -> tuple[float, float]:
+        nan = float("nan")
         if self._available is False:
-            return float("nan")
+            return (nan, nan)
         if shutil.which("nvidia-smi") is None:
             self._available = False
-            return float("nan")
+            return (nan, nan)
         try:
             out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
+                [
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,utilization.decoder",
+                    "--format=csv,noheader,nounits",
+                ],
                 stderr=subprocess.DEVNULL,
                 timeout=2.0,
                 creationflags=_NO_WINDOW,
             )
             self._available = True
-            return float(out.decode().strip().splitlines()[0])
+            line = out.decode().strip().splitlines()[0]
+            parts = [p.strip() for p in line.split(",")]
+            gpu = float(parts[0]) if parts and parts[0] else nan
+            dec = float(parts[1]) if len(parts) > 1 and parts[1] else nan
+            return (gpu, dec)
         except Exception:
             self._available = False
-            return float("nan")
+            return (nan, nan)
 
 
 class ResourceMonitor(QWidget):
@@ -70,8 +89,18 @@ class ResourceMonitor(QWidget):
         super().__init__(parent)
         self._cpu_label = QLabel("CPU —")
         self._gpu_label = QLabel("GPU —")
+        # NVDEC = NVIDIA's dedicated video-decoder engine. Separated
+        # from the shader/compute GPU% because during pure playback the
+        # 3D engine sits near zero while NVDEC does all the work.
+        self._nvdec_label = QLabel("NVDEC —")
+        self._nvdec_label.setToolTip(
+            "NVIDIA'nın donanım video decoder çipinin (NVDEC) kullanımı. "
+            "Video oynatırken GPU %'si düşük kalabilir ama NVDEC %'si "
+            "yükseliyorsa HW hızlandırma aktif demektir."
+        )
         self._net_label = QLabel("Ağ —")
-        for lbl in (self._cpu_label, self._gpu_label, self._net_label):
+        for lbl in (self._cpu_label, self._gpu_label,
+                    self._nvdec_label, self._net_label):
             lbl.setObjectName("ResourceLabel")
 
         layout = QHBoxLayout(self)
@@ -79,6 +108,7 @@ class ResourceMonitor(QWidget):
         layout.setSpacing(14)
         layout.addWidget(self._cpu_label)
         layout.addWidget(self._gpu_label)
+        layout.addWidget(self._nvdec_label)
         layout.addWidget(self._net_label)
 
         self._last_net = self._net_counters()
@@ -99,6 +129,7 @@ class ResourceMonitor(QWidget):
         else:
             self._cpu_label.setText("CPU n/a")
             self._gpu_label.setText("GPU n/a")
+            self._nvdec_label.setText("NVDEC n/a")
             self._net_label.setText("Ağ n/a")
 
     # -- helpers --
@@ -119,11 +150,15 @@ class ResourceMonitor(QWidget):
         self._gpu_thread = thread
         self._gpu_probe = probe
 
-    def _on_gpu_sample(self, value: float) -> None:
-        if value != value:  # NaN check
+    def _on_gpu_sample(self, gpu: float, dec: float) -> None:
+        if gpu != gpu:  # NaN check for shader/compute engine
             self._gpu_label.setText("GPU n/a")
         else:
-            self._gpu_label.setText(f"GPU {value:.0f}%")
+            self._gpu_label.setText(f"GPU {gpu:.0f}%")
+        if dec != dec:  # NaN check for NVDEC engine
+            self._nvdec_label.setText("NVDEC n/a")
+        else:
+            self._nvdec_label.setText(f"NVDEC {dec:.0f}%")
 
     def _refresh_cpu_net(self) -> None:
         if psutil is None:
