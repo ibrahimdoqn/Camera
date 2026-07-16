@@ -16,6 +16,11 @@ from typing import Optional
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 
+from .logger import get_logger
+
+
+_log = get_logger("ptz")
+
 
 @dataclass
 class PtzPreset:
@@ -41,9 +46,11 @@ class _PtzWorker(QObject):
 
     @pyqtSlot()
     def initialize(self) -> None:
+        _log.info("PTZ init %s:%s user=%s", self._host, self._port, self._username)
         try:
             from onvif import ONVIFCamera  # type: ignore
         except Exception as exc:  # pragma: no cover - import error path
+            _log.error("onvif-zeep import failed: %s", exc)
             self._supported = False
             self.capabilities_ready.emit(False, f"onvif-zeep yüklü değil: {exc}")
             return
@@ -53,12 +60,15 @@ class _PtzWorker(QObject):
             media = cam.create_media_service()
             profiles = media.GetProfiles()
             if not profiles:
+                _log.warning("PTZ %s: no ONVIF media profiles", self._host)
                 self._supported = False
                 self.capabilities_ready.emit(False, "ONVIF medya profili bulunamadı")
                 return
             profile = profiles[0]
+            _log.debug("PTZ %s: using profile token=%s", self._host, profile.token)
             ptz_config = getattr(profile, "PTZConfiguration", None)
             if ptz_config is None:
+                _log.info("PTZ %s: profile has no PTZConfiguration", self._host)
                 self._supported = False
                 self.capabilities_ready.emit(False, "Kamera PTZ desteklemiyor")
                 return
@@ -67,9 +77,12 @@ class _PtzWorker(QObject):
             self._ptz = ptz
             self._profile_token = profile.token
             self._supported = True
+            _log.info("PTZ %s: capabilities ready, profile_token=%s",
+                      self._host, profile.token)
             self.capabilities_ready.emit(True, "Hareket destekleniyor")
             self._load_presets()
         except Exception as exc:
+            _log.exception("PTZ %s: init failed", self._host)
             self._supported = False
             self.capabilities_ready.emit(False, f"ONVIF bağlantısı başarısız: {exc}")
 
@@ -84,14 +97,19 @@ class _PtzWorker(QObject):
                 PtzPreset(token=p.token, name=(getattr(p, "Name", "") or p.token))
                 for p in presets
             ]
+            _log.info("PTZ %s: %d preset(s) loaded", self._host, len(result))
             self.presets_ready.emit(result)
         except Exception as exc:
+            _log.warning("PTZ %s: preset load failed: %s", self._host, exc)
             self.error.emit(f"Preset listesi alınamadı: {exc}")
 
     @pyqtSlot(float, float, float)
     def continuous_move(self, pan: float, tilt: float, zoom: float) -> None:
         if not self._supported or self._ptz is None:
+            _log.debug("PTZ %s: move ignored (not ready)", self._host)
             return
+        _log.debug("PTZ %s: continuous_move pan=%.2f tilt=%.2f zoom=%.2f",
+                   self._host, pan, tilt, zoom)
         try:
             req = self._ptz.create_type("ContinuousMove")
             req.ProfileToken = self._profile_token
@@ -101,12 +119,14 @@ class _PtzWorker(QObject):
             }
             self._ptz.ContinuousMove(req)
         except Exception as exc:
+            _log.warning("PTZ %s: continuous_move failed: %s", self._host, exc)
             self.error.emit(f"Hareket hatası: {exc}")
 
     @pyqtSlot()
     def stop_move(self) -> None:
         if not self._supported or self._ptz is None:
             return
+        _log.debug("PTZ %s: stop", self._host)
         try:
             req = self._ptz.create_type("Stop")
             req.ProfileToken = self._profile_token
@@ -114,18 +134,21 @@ class _PtzWorker(QObject):
             req.Zoom = True
             self._ptz.Stop(req)
         except Exception as exc:
+            _log.warning("PTZ %s: stop failed: %s", self._host, exc)
             self.error.emit(f"Durdurma hatası: {exc}")
 
     @pyqtSlot(str)
     def goto_preset(self, token: str) -> None:
         if not self._supported or self._ptz is None:
             return
+        _log.debug("PTZ %s: goto_preset token=%s", self._host, token)
         try:
             req = self._ptz.create_type("GotoPreset")
             req.ProfileToken = self._profile_token
             req.PresetToken = token
             self._ptz.GotoPreset(req)
         except Exception as exc:
+            _log.warning("PTZ %s: goto_preset failed: %s", self._host, exc)
             self.error.emit(f"Preset gidiş hatası: {exc}")
 
 
@@ -195,12 +218,16 @@ class PtzController(QObject):
         self.presets_ready.emit(list(presets))
 
     def move(self, pan: float, tilt: float, zoom: float = 0.0) -> None:
+        _log.debug("PTZ %s: controller.move → worker (pan=%.2f tilt=%.2f zoom=%.2f)",
+                   self._host, pan, tilt, zoom)
         self._request_move.emit(pan, tilt, zoom)
 
     def stop_move(self) -> None:
+        _log.debug("PTZ %s: controller.stop_move → worker", self._host)
         self._request_stop.emit()
 
     def goto_preset(self, token: str) -> None:
+        _log.debug("PTZ %s: controller.goto_preset(%s) → worker", self._host, token)
         self._request_goto.emit(token)
 
     def shutdown(self) -> None:
