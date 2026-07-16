@@ -93,6 +93,12 @@ class VLCFrameWorker(QObject):
         self._target_fps = max(1, int(target_fps))
         self._reconnect_delay = reconnect_delay
         self._running = False
+        # When True, the tile is off-screen (usually because another tile
+        # was maximized). We keep the libVLC pipeline running so audio,
+        # the reconnect loop and the watchdog stay live, but skip the
+        # numpy copy + Qt signal marshaling for each decoded frame —
+        # painting into a QPixmap that nobody looks at is pure waste.
+        self._paused = False
 
         # libVLC handles; owned by the run loop.
         self._instance = None
@@ -129,6 +135,22 @@ class VLCFrameWorker(QObject):
 
     def update_target_fps(self, fps: int) -> None:
         self._target_fps = max(1, int(fps))
+
+    def set_paused(self, paused: bool) -> None:
+        """Toggle the frame-emit path without stopping libVLC.
+
+        A paused worker still consumes RTSP data and drives its watchdog
+        (so the sidebar status dot stays accurate and audio keeps
+        playing), but doesn't hand decoded frames up to the UI. Useful
+        when another tile has been maximized and this one's paint output
+        would just be thrown away.
+        """
+        was_paused = self._paused
+        self._paused = bool(paused)
+        if was_paused and not paused:
+            # Fire the next frame straight away instead of waiting for
+            # the throttle interval to elapse.
+            self._last_emit = 0.0
 
     def stop(self) -> None:
         self._running = False
@@ -191,6 +213,20 @@ class VLCFrameWorker(QObject):
             self._instance = vlc.Instance(*instance_args)
             if self._instance is None:
                 raise RuntimeError("vlc.Instance returned None")
+            # Silence libVLC + libavcodec log output. Without this the app
+            # spams the console with harmless swscaler warnings on every
+            # frame ("deprecated pixel format used, make sure you did set
+            # range correctly") — libavcodec emits those whenever the
+            # decoder's native YUV chroma is JPEG-range while swscale
+            # expects the range flag to be set separately. We can't fix
+            # the flag from Python, but we can drop the log noise.
+            # ``--quiet`` (an instance CLI arg) does not gate libavcodec's
+            # own av_log stream; ``log_unset`` does.
+            try:
+                self._instance.log_unset()
+            except Exception:
+                pass
+
             self._player = self._instance.media_player_new()
             self._media = self._instance.media_new(self._url)
 
@@ -200,12 +236,28 @@ class VLCFrameWorker(QObject):
             # picks the best available hardware decoder on its own (DXVA2
             # / D3D11 / NVDEC / Quick Sync / VAAPI / …) and cleanly falls
             # back to software if none of them work.
+            #
+            # Multi-core hooks:
+            #   * ``avcodec-threads=0``   — libavcodec's own thread pool
+            #     auto-sizes to the CPU core count; setting it explicitly
+            #     documents the intent and forces the sensible default on
+            #     older VLC builds where the default was 1.
+            #   * ``avcodec-fast``        — enables non-strict decode
+            #     shortcuts (skip loop-filter details, faster IDCT paths).
+            #     Safe for live video where we favour throughput over
+            #     bitstream-perfect reconstruction.
+            #   * ``avcodec-hurry-up``    — decoder skips B-frames when it
+            #     can't keep up in real time, preventing the pipeline from
+            #     falling behind and eating CPU catching up.
             media_opts = [
                 ":rtsp-tcp",             # avoid UDP loss on noisy Wi-Fi
                 ":network-caching=300",  # 300 ms is VLC's low-latency default
                 ":live-caching=300",
                 ":clock-jitter=0",
                 ":no-audio",             # belt-and-braces
+                ":avcodec-threads=0",    # auto = one thread per CPU core
+                ":avcodec-fast",
+                ":avcodec-hurry-up",
             ]
             for opt in media_opts:
                 self._media.add_option(opt)
@@ -316,6 +368,13 @@ class VLCFrameWorker(QObject):
             self._first_frame_seen = True
             # Announce online + first frame as soon as VLC delivers pixels.
             self.status_changed.emit("online")
+
+        # If the tile is off-screen there is no point copying the frame
+        # or waking up the UI thread. The watchdog above has already
+        # noted the frame arrived, which is all the state the reconnect
+        # loop cares about.
+        if self._paused:
+            return
 
         # Throttle to the tile's target FPS. Dropped frames are cheap
         # because we don't allocate anything until we're actually emitting.

@@ -151,9 +151,13 @@ class CameraTile(QWidget):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.frame_ready.connect(self._on_frame)
-        worker.status_changed.connect(self._on_status)
-        worker.error.connect(self._on_error)
+        # Cross-thread signals from the worker are marshaled via a queued
+        # connection by default, but we spell it out so the intent is
+        # obvious and no future edit accidentally forces a direct-invoke
+        # from the VLC decoder thread into the UI thread.
+        worker.frame_ready.connect(self._on_frame, Qt.ConnectionType.QueuedConnection)
+        worker.status_changed.connect(self._on_status, Qt.ConnectionType.QueuedConnection)
+        worker.error.connect(self._on_error, Qt.ConnectionType.QueuedConnection)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
@@ -240,6 +244,23 @@ class CameraTile(QWidget):
         self._target_fps = max(1, int(fps))
         if self._worker is not None:
             self._worker.update_target_fps(self._target_fps)
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        # Coming back on screen — resume frame delivery. Applies both
+        # when the main window is first shown and when the grid is
+        # restored after another tile was maximized.
+        if self._worker is not None:
+            self._worker.set_paused(False)
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        super().hideEvent(event)
+        # Going off-screen — tell the worker to keep VLC running (so
+        # reconnect + audio + status still work) but stop marshaling
+        # decoded frames into Qt, which is a per-camera win of ~8 MB
+        # per frame at 1080p.
+        if self._worker is not None:
+            self._worker.set_paused(True)
 
     def set_selected(self, value: bool) -> None:
         if self._selected != value:
@@ -365,18 +386,33 @@ class CameraTile(QWidget):
     # -- worker callbacks --
 
     def _on_frame(self, frame: np.ndarray) -> None:
-        # VLCFrameWorker hands us BGRA packed pixels (VLC's ``RV32`` chroma
-        # on little-endian x86). QImage.Format_ARGB32 reads uint32 words as
-        # 0xAARRGGBB, which lays down in memory as B, G, R, A — an exact
-        # match. That saves a colour-space conversion vs. FFmpeg's BGR24.
-        h, w = frame.shape[:2]
-        image = QImage(
-            frame.data, w, h, w * 4, QImage.Format.Format_ARGB32
-        ).copy()
-        self._pixmap = QPixmap.fromImage(image)
+        # First-frame signal has to fire regardless of visibility — the
+        # splash uses it to know a camera has settled.
         if not self._emitted_first_frame:
             self._emitted_first_frame = True
             self.first_frame.emit(self.camera.id)
+
+        # Skip the expensive QImage → QPixmap conversion when this tile is
+        # off-screen. That's the case when another tile has been
+        # maximized: the QStackedLayout hides the grid host, but our
+        # worker is still delivering frames because the audio + watchdog
+        # need to keep running. Painting into a QPixmap that will never
+        # reach the screen is wasted memory bandwidth (a 1080p BGRA frame
+        # is ~8 MB per camera per emission).
+        if not self.isVisible():
+            return
+
+        # VLCFrameWorker hands us BGRA packed pixels (VLC's ``RV32`` chroma
+        # on little-endian x86). QImage.Format_RGB32 reads uint32 words as
+        # 0xffRRGGBB — memory bytes B, G, R, A(ignored). RV32's alpha byte
+        # is undefined, so RGB32 (which discards it) is safer than
+        # ARGB32 and marginally cheaper to render because the compositor
+        # can skip alpha-blend work on an opaque pixmap.
+        h, w = frame.shape[:2]
+        image = QImage(
+            frame.data, w, h, w * 4, QImage.Format.Format_RGB32
+        ).copy()
+        self._pixmap = QPixmap.fromImage(image)
         self.update()
 
     def _on_status(self, status: str) -> None:
