@@ -175,8 +175,26 @@ class CameraGrid(QWidget):
             tile.stop()
 
     def stop_all_and_wait(self) -> None:
-        for tile in self._tiles.values():
-            tile.stop_and_wait()
+        """Wait for all VLC workers to exit — in parallel, on a small
+        combined budget.
+
+        The previous implementation waited 1.5 s per tile in sequence,
+        which is what made closing a 4-camera window take 6 seconds. We
+        first tell every worker to stop (non-blocking), then run all
+        the ``thread.wait`` calls one after another with a share of a
+        small total budget. Any thread that hasn't exited by then is
+        buried via ``sip.transferto`` inside ``stop_and_wait`` and the
+        OS reclaims it when the process exits.
+        """
+        tiles = list(self._tiles.values())
+        for tile in tiles:
+            tile._worker and tile._worker.stop()  # type: ignore[attr-defined]
+        # 400 ms total across all tiles. On a healthy connection VLC's
+        # stop() returns in <50 ms, so most tiles finish inside this
+        # window; the rest get buried.
+        per_tile_ms = max(60, 400 // max(1, len(tiles)))
+        for tile in tiles:
+            tile.stop_and_wait(timeout_ms=per_tile_ms)
 
     def is_maximized(self) -> bool:
         return self._maximized_id is not None

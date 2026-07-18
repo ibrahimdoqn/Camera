@@ -67,7 +67,15 @@ def main() -> int:
         splash.set_stage("Kameralara bağlanılıyor")
     else:
         splash.set_stage("Hazırlanıyor")
-    splash.finished.connect(window.show)
+
+    def _reveal_window():
+        window.show()
+        # ``apply_display_settings`` needs a windowHandle, which only
+        # exists after ``show()``. Call it right after so multi-monitor
+        # placement + start-fullscreen honour the saved preference.
+        window.apply_display_settings()
+
+    splash.finished.connect(_reveal_window)
     return app.exec()
 
 

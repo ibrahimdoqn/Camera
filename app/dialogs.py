@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -187,6 +188,31 @@ class SettingsDialog(QDialog):
         self.overlay_check = QCheckBox("Kamera adı ve durum rozetini göster")
         self.overlay_check.setChecked(settings.show_overlay)
 
+        # Multi-monitor + fullscreen: the "Ekran" combo lists the
+        # user's connected monitors so they can pin the app to their
+        # secondary display. -1 means "follow the primary screen at
+        # runtime" and is always the first entry.
+        self.screen_combo = QComboBox()
+        self.screen_combo.addItem("Otomatik (birincil)", -1)
+        for idx, scr in enumerate(QGuiApplication.screens()):
+            geo = scr.geometry()
+            label = (
+                f"Ekran {idx + 1}: {scr.name()} "
+                f"({geo.width()}×{geo.height()})"
+            )
+            self.screen_combo.addItem(label, idx)
+        target_idx = self.screen_combo.findData(int(settings.target_screen))
+        if target_idx < 0:
+            # Saved screen no longer exists — fall back to Auto so the
+            # window doesn't open on a missing display.
+            target_idx = 0
+        self.screen_combo.setCurrentIndex(target_idx)
+
+        self.fullscreen_check = QCheckBox(
+            "Seçili ekranda tam ekran başlat (F11 ile açıp kapatılabilir)"
+        )
+        self.fullscreen_check.setChecked(bool(settings.start_fullscreen))
+
         # Diagnostics section: file logging + IP rediscovery.
         self.logging_check = QCheckBox("Log kayıtlarını dosyaya yaz")
         self.logging_check.setToolTip(
@@ -213,6 +239,8 @@ class SettingsDialog(QDialog):
         form.addRow("Sütun sayısı", self.grid_spin)
         form.addRow("Hedef FPS", self.fps_spin)
         form.addRow("Yeniden bağlanma", self.reconnect_spin)
+        form.addRow("Ekran", self.screen_combo)
+        form.addRow("", self.fullscreen_check)
         form.addRow("", self.overlay_check)
 
         diag_title = QLabel("Tanılama")
@@ -258,6 +286,8 @@ class SettingsDialog(QDialog):
             logging_enabled=self.logging_check.isChecked(),
             log_level=self.log_level_combo.currentText(),
             ip_rediscovery_enabled=self.rediscover_check.isChecked(),
+            target_screen=int(self.screen_combo.currentData()),
+            start_fullscreen=self.fullscreen_check.isChecked(),
         )
 
 

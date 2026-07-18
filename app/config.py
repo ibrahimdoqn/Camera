@@ -64,12 +64,24 @@ class Settings:
     decode_width: int = 0  # 0 = native
     reconnect_delay: float = 3.0
     show_overlay: bool = True
+    # Sidebar visibility. ``sidebar_collapsed`` — kept for backwards
+    # compatibility with older configs — is treated as the fully-hidden
+    # state now: the sidebar disappears entirely and a floating chevron
+    # reveals it when the mouse touches the left edge of the window.
     sidebar_collapsed: bool = False
     # File-based diagnostics. Logs land in %APPDATA%/TapoViewer/logs.
     logging_enabled: bool = False
     log_level: str = "INFO"
     # Rediscover a camera by MAC if its configured IP stops responding.
     ip_rediscovery_enabled: bool = True
+    # Multi-monitor + fullscreen support.
+    #   target_screen    = index into QGuiApplication.screens(), or -1
+    #                       to always follow the primary screen.
+    #   start_fullscreen = show the main window fullscreen on the
+    #                       chosen screen at launch (F11 toggles at
+    #                       runtime either way).
+    target_screen: int = -1
+    start_fullscreen: bool = False
 
 
 @dataclass

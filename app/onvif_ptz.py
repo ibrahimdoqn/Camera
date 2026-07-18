@@ -18,8 +18,31 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal, pyqtSlot
 
 from .logger import get_logger
 
+try:
+    from PyQt6 import sip  # type: ignore
+except ImportError:  # pragma: no cover - sip ships with PyQt6
+    sip = None  # type: ignore
+
 
 _log = get_logger("ptz")
+
+
+# Same graveyard trick :mod:`camera_tile` uses — keep worker + thread
+# alive after the controller goes out of scope, so PyQt's C++
+# destructor for ``QThread`` doesn't fire while ``run()`` is still on
+# the stack (which crashes the process on Windows).
+_PTZ_GRAVEYARD: set = set()
+
+
+def _bury_ptz_thread(worker: object, thread: object) -> None:
+    if sip is not None:
+        for obj in (worker, thread):
+            try:
+                sip.transferto(obj, None)
+            except (TypeError, ValueError):
+                pass
+        return
+    _PTZ_GRAVEYARD.add((worker, thread))
 
 
 @dataclass
@@ -230,13 +253,35 @@ class PtzController(QObject):
         _log.debug("PTZ %s: controller.goto_preset(%s) → worker", self._host, token)
         self._request_goto.emit(token)
 
-    def shutdown(self) -> None:
+    def shutdown(self, block_ms: int = 0) -> None:
+        """Ask the worker thread to exit.
+
+        By default ``block_ms=0`` — quit the event loop and return
+        immediately. Blocking the UI on ``thread.wait`` during
+        ``ptz_manager.remove()`` (which happens on the click stack of
+        the "Kaldır" menu action) held the window frozen for 2 s per
+        camera and, in the worst case, crashed the app because queued
+        signals from the still-running SOAP call landed on a
+        half-destroyed controller. Passing a positive ``block_ms`` is
+        reserved for graceful app shutdown where a brief wait is
+        acceptable.
+
+        We also transfer the Python ownership of the worker + thread
+        to Qt with ``sip.transferto`` — otherwise dropping the
+        controller reference could destroy the C++ ``QThread`` while
+        the ONVIF SOAP call is still in flight.
+        """
         try:
             self._request_stop.emit()
         except Exception:
             pass
         self._thread.quit()
-        self._thread.wait(2000)
+        if block_ms > 0 and self._thread.wait(block_ms):
+            # Thread finished cleanly — Python is safe to drop refs.
+            return
+        # Still running or block_ms == 0. Bury it so PyQt's sip layer
+        # doesn't fire ~QThread() while run() is still executing.
+        _bury_ptz_thread(self._worker, self._thread)
 
 
 class PtzManager(QObject):
@@ -297,10 +342,35 @@ class PtzManager(QObject):
             self.ensure(cam)
 
     def shutdown(self) -> None:
-        for ctrl in self._controllers.values():
+        """Tear down every PTZ controller.
+
+        Fire ``quit`` on every worker thread first (non-blocking), then
+        run a short wait budget across all of them in parallel. The
+        previous implementation waited 2 s on each controller in
+        sequence, which is what made closing the app take 2 s × N
+        cameras. If a worker is still stuck in a SOAP call after the
+        combined budget, its thread + Python wrapper are buried and
+        the process exits.
+        """
+        controllers = list(self._controllers.values())
+        for ctrl in controllers:
             try:
-                ctrl.shutdown()
+                ctrl.shutdown(block_ms=0)  # non-blocking quit
             except Exception:
                 pass
-            ctrl.deleteLater()
+        # Total budget for all controllers combined, not per controller.
+        deadline_per = 300 // max(1, len(controllers)) if controllers else 0
+        for ctrl in controllers:
+            try:
+                if deadline_per and ctrl._thread.wait(deadline_per):
+                    continue
+            except Exception:
+                pass
+            # Give up on cleanly waiting — the burial in shutdown()
+            # already made this safe.
+        for ctrl in controllers:
+            try:
+                ctrl.deleteLater()
+            except Exception:
+                pass
         self._controllers.clear()

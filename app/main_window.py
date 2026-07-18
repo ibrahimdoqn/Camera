@@ -1,15 +1,17 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QCloseEvent,
     QColor,
+    QGuiApplication,
     QKeySequence,
     QPainter,
     QPaintEvent,
     QPen,
+    QResizeEvent,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -96,6 +98,51 @@ SIDEBAR_WIDTH = 280
 # leaving the button visually centred when the sidebar is collapsed.
 SIDEBAR_COLLAPSED_WIDTH = 56
 TOGGLE_BUTTON_SIZE = 40
+
+# Left-edge hover zone that reveals the "open sidebar" chevron when the
+# sidebar is fully hidden. Kept narrow so it doesn't intercept clicks the
+# user meant for the grid, but wide enough to be a comfortable target.
+EDGE_TRIGGER_WIDTH = 14
+REVEAL_BUTTON_WIDTH = 28
+REVEAL_BUTTON_HEIGHT = 60
+# Delay before the reveal button hides after the mouse leaves both it
+# and the trigger zone — gives the user time to travel between the two.
+REVEAL_HIDE_DELAY_MS = 200
+
+
+class _RevealChevron(QPushButton):
+    """Small floating chevron that appears at the left edge when the
+    sidebar is fully hidden. Clicking it re-opens the sidebar; letting
+    the mouse leave hides it after a short grace period."""
+
+    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        rect = self.rect()
+        # Rounded-right pill so it looks like a tab peeking out of the
+        # window's left edge.
+        bg = QColor("#1c1c1e") if not self.underMouse() else QColor("#2c2c2e")
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(bg)
+        path = QPointF(rect.left(), rect.top()), rect.width(), rect.height()
+        # Draw a rounded rectangle whose left side is flush with the
+        # window edge (no left rounding) but whose right side is round.
+        painter.drawRoundedRect(
+            rect.adjusted(-8, 0, 0, 0), 10.0, 10.0
+        )
+        cx = rect.center().x() + 0.5
+        cy = rect.center().y() + 0.5
+        size = 6.0
+        pen = QPen(QColor("#f2f2f7"))
+        pen.setWidthF(2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        tip = QPointF(cx + size * 0.5, cy)
+        top = QPointF(cx - size * 0.5, cy - size)
+        bot = QPointF(cx - size * 0.5, cy + size)
+        painter.drawLine(top, tip)
+        painter.drawLine(tip, bot)
 
 
 class MainWindow(QMainWindow):
@@ -229,6 +276,42 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.grid, 1)
         self.setCentralWidget(central)
 
+        # Edge-hover reveal: a thin invisible strip on the left edge that
+        # captures enterEvent to show the floating chevron, plus the
+        # chevron button itself. Both are parented to the central widget
+        # so they sit above the grid without disturbing its layout. Only
+        # visible when the sidebar is fully hidden.
+        self._edge_trigger = QWidget(central)
+        self._edge_trigger.setObjectName("EdgeTrigger")
+        self._edge_trigger.setStyleSheet("background: transparent;")
+        # Hover-only widget: clicks fall through to the grid below (so
+        # the user can still click on the leftmost pixel of a tile) but
+        # HoverEnter / HoverLeave still fire so we know when to show
+        # the reveal chevron. Without WA_Hover, WA_TransparentForMouseEvents
+        # would suppress every mouse event including the ones we need.
+        self._edge_trigger.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._edge_trigger.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self._edge_trigger.installEventFilter(self)
+        self._edge_trigger.hide()
+
+        self._reveal_btn = _RevealChevron(central)
+        self._reveal_btn.setFixedSize(REVEAL_BUTTON_WIDTH, REVEAL_BUTTON_HEIGHT)
+        self._reveal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._reveal_btn.setToolTip("Kenar çubuğunu göster")
+        self._reveal_btn.installEventFilter(self)
+        self._reveal_btn.clicked.connect(self._reveal_sidebar)
+        self._reveal_btn.hide()
+
+        # Timer that hides the reveal button once the mouse has stayed
+        # away from both the trigger zone and the button itself for
+        # ``REVEAL_HIDE_DELAY_MS``. Restarted whenever the mouse touches
+        # either widget.
+        self._reveal_hide_timer = QTimer(self)
+        self._reveal_hide_timer.setSingleShot(True)
+        self._reveal_hide_timer.setInterval(REVEAL_HIDE_DELAY_MS)
+        self._reveal_hide_timer.timeout.connect(self._maybe_hide_reveal)
+
         status = QStatusBar()
         self.setStatusBar(status)
         self._status_label = QLabel("Hazır")
@@ -241,6 +324,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add_camera)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self._on_open_settings)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_sidebar)
+        QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
 
         self._refresh_camera_list()
         self.grid.set_cameras(self._visible_cameras())
@@ -293,34 +377,149 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_collapsed_state(self) -> None:
-        self.sidebar.setFixedWidth(
-            SIDEBAR_COLLAPSED_WIDTH if self._collapsed else SIDEBAR_WIDTH
-        )
+        # "Collapsed" is now equivalent to "fully hidden" — the sidebar
+        # disappears, the grid claims the full width, and the edge
+        # trigger arms to reveal it on hover. The historical middle
+        # state (a 56 px chevron column) was removed in this pass
+        # because the user asked for maximum viewing area.
+        if self._collapsed:
+            self.sidebar.hide()
+            self._edge_trigger.show()
+            self._edge_trigger.raise_()
+            self._update_edge_geometry()
+        else:
+            self.sidebar.show()
+            self.sidebar.setFixedWidth(SIDEBAR_WIDTH)
+            self._edge_trigger.hide()
+            self._reveal_btn.hide()
+            self._reveal_hide_timer.stop()
+
         self.body_widget.setVisible(not self._collapsed)
         self.title_label.setVisible(not self._collapsed)
         # Custom-painted chevron stays perfectly centred regardless of font.
         self.toggle_btn.set_collapsed(self._collapsed)
         self.toggle_btn.setToolTip(
-            "Kenar çubuğunu genişlet" if self._collapsed else "Kenar çubuğunu daralt"
+            "Kenar çubuğunu gizle" if not self._collapsed else "Kenar çubuğunu göster"
         )
-        # Rebuild the header row so the toggle button is perfectly centred
-        # when collapsed (stretches on both sides) and flush-left next to the
-        # title when expanded.
+        # Rebuild the header row so the toggle button is flush-left with
+        # the title when the sidebar is open.
         while self._header_row.count():
             self._header_row.takeAt(0)
-        if self._collapsed:
-            self._header_row.addStretch(1)
-            self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-            self._header_row.addStretch(1)
-        else:
-            self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
-            self._header_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
+        self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        self._header_row.addWidget(self.title_label, 1, Qt.AlignmentFlag.AlignVCenter)
 
     def _toggle_sidebar(self) -> None:
         self._collapsed = not self._collapsed
         self._config.settings.sidebar_collapsed = self._collapsed
         self._save()
         self._apply_collapsed_state()
+
+    def _reveal_sidebar(self) -> None:
+        """Re-open the sidebar from the floating chevron."""
+        if not self._collapsed:
+            return
+        self._collapsed = False
+        self._config.settings.sidebar_collapsed = False
+        self._save()
+        self._apply_collapsed_state()
+
+    # -- edge-hover reveal ---------------------------------------------
+
+    def _update_edge_geometry(self) -> None:
+        """Recalculate the trigger + reveal button positions."""
+        central = self.centralWidget()
+        if central is None:
+            return
+        h = central.height()
+        # Trigger fills the full window height along the left edge.
+        self._edge_trigger.setGeometry(0, 0, EDGE_TRIGGER_WIDTH, h)
+        # Reveal button sits half-way down, flush-left, only when the
+        # sidebar is hidden.
+        btn_y = max(0, (h - REVEAL_BUTTON_HEIGHT) // 2)
+        self._reveal_btn.setGeometry(
+            0, btn_y, REVEAL_BUTTON_WIDTH, REVEAL_BUTTON_HEIGHT
+        )
+        self._reveal_btn.raise_()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        # Show / hide the reveal chevron based on mouse entry into the
+        # trigger strip (hover events, since the strip lets real clicks
+        # pass through to the grid) and the button itself (normal
+        # Enter/Leave, since the button is clickable).
+        if obj is self._edge_trigger:
+            t = event.type()
+            if t == QEvent.Type.HoverEnter or t == QEvent.Type.Enter:
+                self._show_reveal_button()
+            elif t == QEvent.Type.HoverLeave or t == QEvent.Type.Leave:
+                self._reveal_hide_timer.start()
+        elif obj is self._reveal_btn:
+            if event.type() == QEvent.Type.Enter:
+                self._reveal_hide_timer.stop()
+            elif event.type() == QEvent.Type.Leave:
+                self._reveal_hide_timer.start()
+        return super().eventFilter(obj, event)
+
+    def _show_reveal_button(self) -> None:
+        if not self._collapsed:
+            return
+        self._reveal_hide_timer.stop()
+        self._update_edge_geometry()
+        self._reveal_btn.show()
+        self._reveal_btn.raise_()
+
+    def _maybe_hide_reveal(self) -> None:
+        # Only hide if the mouse is not currently inside either widget.
+        if self._reveal_btn.underMouse() or self._edge_trigger.underMouse():
+            self._reveal_hide_timer.start()
+            return
+        self._reveal_btn.hide()
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        if self._collapsed:
+            self._update_edge_geometry()
+
+    # -- fullscreen + display ------------------------------------------
+
+    def _toggle_fullscreen(self) -> None:
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def apply_display_settings(self) -> None:
+        """Move the window to the configured target screen and, if the
+        ``start_fullscreen`` setting is on, enter fullscreen. Called
+        after :meth:`show` from the entry point.
+        """
+        settings = self._config.settings
+        screens = QGuiApplication.screens()
+        if not screens:
+            return
+        target_idx = int(settings.target_screen)
+        if target_idx < 0 or target_idx >= len(screens):
+            screen = QGuiApplication.primaryScreen()
+        else:
+            screen = screens[target_idx]
+        if screen is None:
+            return
+        # Move the window's top-left to the target screen so it's
+        # unambiguously on that display. Preserve the current size.
+        geo = self.geometry()
+        s_geo = screen.availableGeometry()
+        # Centre inside the target screen so the window doesn't hug the
+        # top-left corner on a large monitor.
+        x = s_geo.x() + max(0, (s_geo.width() - geo.width()) // 2)
+        y = s_geo.y() + max(0, (s_geo.height() - geo.height()) // 2)
+        self.move(x, y)
+        handle = self.windowHandle()
+        if handle is not None:
+            try:
+                handle.setScreen(screen)
+            except Exception:
+                pass
+        if bool(settings.start_fullscreen):
+            self.showFullScreen()
 
     # -- handlers --
 
@@ -471,34 +670,40 @@ class MainWindow(QMainWindow):
 
     def _on_add_camera(self) -> None:
         dlg = CameraDialog(parent=self)
-        if dlg.exec() == CameraDialog.DialogCode.Accepted:
-            cam = dlg.result_camera()
-            if not cam.host and not cam.use_custom_url:
-                QMessageBox.warning(self, "Eksik Bilgi", "Host/IP veya özel URL girilmelidir.")
-                return
-            self._config.cameras.append(cam)
-            self._save()
-            self._refresh_camera_list(selected_id=cam.id)
-            self.grid.set_cameras(self._visible_cameras())
-            self.ptz_manager.sync(self._config.cameras)
-            self._update_status()
+        if dlg.exec() != CameraDialog.DialogCode.Accepted:
+            return
+        cam = dlg.result_camera()
+        if not cam.host and not cam.use_custom_url:
+            QMessageBox.warning(self, "Eksik Bilgi", "Host/IP veya özel URL girilmelidir.")
+            return
+        self._config.cameras.append(cam)
+        self._save()
+        self._refresh_camera_list(selected_id=cam.id)
+        # Defer the grid / PTZ rebuild off the dialog's click stack.
+        # Rebuilding inline used to crash on Windows because the
+        # dialog's Qt::Accept event was still on the stack when we
+        # started spinning up a new QThread + VLC instance for the
+        # new tile — same trick :meth:`_apply_visibility_change` uses.
+        QTimer.singleShot(0, self._rebuild_grid_and_ptz)
 
     def _on_edit_camera(self) -> None:
         cam = self._selected_camera()
         if cam is None:
             return
         dlg = CameraDialog(parent=self, camera=cam)
-        if dlg.exec() == CameraDialog.DialogCode.Accepted:
-            updated = dlg.result_camera()
-            for i, c in enumerate(self._config.cameras):
-                if c.id == updated.id:
-                    self._config.cameras[i] = updated
-                    break
-            self._save()
-            self._refresh_camera_list(selected_id=updated.id)
-            self.grid.set_cameras(self._visible_cameras())
-            self.ptz_manager.sync(self._config.cameras)
-            self.ptz_panel.set_camera(self._camera_by_id(updated.id))
+        if dlg.exec() != CameraDialog.DialogCode.Accepted:
+            return
+        updated = dlg.result_camera()
+        for i, c in enumerate(self._config.cameras):
+            if c.id == updated.id:
+                self._config.cameras[i] = updated
+                break
+        self._save()
+        self._refresh_camera_list(selected_id=updated.id)
+        QTimer.singleShot(
+            0,
+            lambda cid=updated.id: self._rebuild_grid_and_ptz(select_id=cid),
+        )
 
     def _on_remove_camera(self) -> None:
         cam = self._selected_camera()
@@ -512,13 +717,35 @@ class MainWindow(QMainWindow):
         )
         if confirm != QMessageBox.StandardButton.Yes:
             return
-        self._config.cameras = [c for c in self._config.cameras if c.id != cam.id]
+        removed_id = cam.id
+        self._config.cameras = [c for c in self._config.cameras if c.id != removed_id]
         self._save()
         self._refresh_camera_list()
+        # Defer the destructive teardown (tile stop, PTZ controller
+        # shutdown, both potentially touching libvlc / SOAP threads)
+        # off the click stack of the confirmation dialog. Running it
+        # inline used to crash the process because the QMessageBox
+        # button event was still unwinding when we started tearing
+        # down a QThread.
+        self.ptz_panel.set_camera(None)
+        QTimer.singleShot(
+            0,
+            lambda cid=removed_id: self._finalize_camera_removal(cid),
+        )
+
+    def _finalize_camera_removal(self, camera_id: str) -> None:
         self.grid.set_cameras(self._visible_cameras())
-        self.ptz_manager.remove(cam.id)
+        self.ptz_manager.remove(camera_id)
         self.ptz_manager.sync(self._config.cameras)
         self.ptz_panel.set_camera(self._selected_camera())
+        self._update_status()
+
+    def _rebuild_grid_and_ptz(self, select_id: str | None = None) -> None:
+        """Rebuild the grid + PTZ manager off the caller's stack frame."""
+        self.grid.set_cameras(self._visible_cameras())
+        self.ptz_manager.sync(self._config.cameras)
+        if select_id is not None:
+            self.ptz_panel.set_camera(self._camera_by_id(select_id))
         self._update_status()
 
     def _on_open_settings(self) -> None:
@@ -527,6 +754,8 @@ class MainWindow(QMainWindow):
             new_settings = dlg.result_settings()
             # Preserve sidebar state across settings changes.
             new_settings.sidebar_collapsed = self._config.settings.sidebar_collapsed
+            prev_screen = self._config.settings.target_screen
+            prev_fullscreen = self._config.settings.start_fullscreen
             self._config.settings = new_settings
             self._save()
             # FPS / overlay / columns all apply live without restarting workers.
@@ -539,6 +768,14 @@ class MainWindow(QMainWindow):
                       new_settings.logging_enabled,
                       new_settings.log_level,
                       new_settings.ip_rediscovery_enabled)
+            # If the target screen changed OR the fullscreen preference
+            # was flipped on, honour the new pick live so the user doesn't
+            # have to restart the app.
+            screen_changed = new_settings.target_screen != prev_screen
+            fullscreen_turned_on = (new_settings.start_fullscreen
+                                    and not prev_fullscreen)
+            if screen_changed or fullscreen_turned_on:
+                self.apply_display_settings()
             self._update_status()
 
     def _on_tile_status_changed(self, camera_id: str, status: str) -> None:
@@ -696,9 +933,21 @@ class MainWindow(QMainWindow):
     # -- close --
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        # Kick every long-lived background actor first, ALL non-blocking,
+        # so the sockets/subprocesses start winding down in parallel. Then
+        # spend one short combined budget waiting for them. The previous
+        # implementation waited up to 2 s per PTZ controller + 1.5 s per
+        # tile in sequence, which is why closing a 4-camera window took
+        # 8+ seconds. Anything still running after the budget is buried
+        # via sip.transferto and the OS reclaims it when the process
+        # exits.
         self.ptz_panel.shutdown()
-        self.ptz_manager.shutdown()
-        self.grid.stop_all_and_wait()
+        self.ptz_manager.shutdown()   # already non-blocking, buries stragglers
+        self.grid.stop_all()          # sends stop() to every VLC worker
         self._resource_monitor.shutdown()
+        # Give the VLC workers a very short chance to close their RTSP
+        # sockets cleanly. Anything not done in this window gets buried
+        # by ``stop_and_wait`` (which uses the same sip.transferto path).
+        self.grid.stop_all_and_wait()
         self._save()
         super().closeEvent(event)
