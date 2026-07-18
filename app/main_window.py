@@ -1,7 +1,7 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QCloseEvent,
@@ -11,7 +11,6 @@ from PyQt6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
-    QResizeEvent,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -98,51 +97,6 @@ SIDEBAR_WIDTH = 280
 # leaving the button visually centred when the sidebar is collapsed.
 SIDEBAR_COLLAPSED_WIDTH = 56
 TOGGLE_BUTTON_SIZE = 40
-
-# Left-edge hover zone that reveals the "open sidebar" chevron when the
-# sidebar is fully hidden. Kept narrow so it doesn't intercept clicks the
-# user meant for the grid, but wide enough to be a comfortable target.
-EDGE_TRIGGER_WIDTH = 14
-REVEAL_BUTTON_WIDTH = 28
-REVEAL_BUTTON_HEIGHT = 60
-# Delay before the reveal button hides after the mouse leaves both it
-# and the trigger zone — gives the user time to travel between the two.
-REVEAL_HIDE_DELAY_MS = 200
-
-
-class _RevealChevron(QPushButton):
-    """Small floating chevron that appears at the left edge when the
-    sidebar is fully hidden. Clicking it re-opens the sidebar; letting
-    the mouse leave hides it after a short grace period."""
-
-    def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        rect = self.rect()
-        # Rounded-right pill so it looks like a tab peeking out of the
-        # window's left edge.
-        bg = QColor("#1c1c1e") if not self.underMouse() else QColor("#2c2c2e")
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(bg)
-        path = QPointF(rect.left(), rect.top()), rect.width(), rect.height()
-        # Draw a rounded rectangle whose left side is flush with the
-        # window edge (no left rounding) but whose right side is round.
-        painter.drawRoundedRect(
-            rect.adjusted(-8, 0, 0, 0), 10.0, 10.0
-        )
-        cx = rect.center().x() + 0.5
-        cy = rect.center().y() + 0.5
-        size = 6.0
-        pen = QPen(QColor("#f2f2f7"))
-        pen.setWidthF(2.2)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
-        painter.setPen(pen)
-        tip = QPointF(cx + size * 0.5, cy)
-        top = QPointF(cx - size * 0.5, cy - size)
-        bot = QPointF(cx - size * 0.5, cy + size)
-        painter.drawLine(top, tip)
-        painter.drawLine(tip, bot)
 
 
 class MainWindow(QMainWindow):
@@ -276,42 +230,6 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.grid, 1)
         self.setCentralWidget(central)
 
-        # Edge-hover reveal: a thin invisible strip on the left edge that
-        # captures enterEvent to show the floating chevron, plus the
-        # chevron button itself. Both are parented to the central widget
-        # so they sit above the grid without disturbing its layout. Only
-        # visible when the sidebar is fully hidden.
-        self._edge_trigger = QWidget(central)
-        self._edge_trigger.setObjectName("EdgeTrigger")
-        self._edge_trigger.setStyleSheet("background: transparent;")
-        # Hover-only widget: clicks fall through to the grid below (so
-        # the user can still click on the leftmost pixel of a tile) but
-        # HoverEnter / HoverLeave still fire so we know when to show
-        # the reveal chevron. Without WA_Hover, WA_TransparentForMouseEvents
-        # would suppress every mouse event including the ones we need.
-        self._edge_trigger.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self._edge_trigger.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
-        self._edge_trigger.installEventFilter(self)
-        self._edge_trigger.hide()
-
-        self._reveal_btn = _RevealChevron(central)
-        self._reveal_btn.setFixedSize(REVEAL_BUTTON_WIDTH, REVEAL_BUTTON_HEIGHT)
-        self._reveal_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._reveal_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self._reveal_btn.setToolTip("Kenar çubuğunu göster")
-        self._reveal_btn.installEventFilter(self)
-        self._reveal_btn.clicked.connect(self._reveal_sidebar)
-        self._reveal_btn.hide()
-
-        # Timer that hides the reveal button once the mouse has stayed
-        # away from both the trigger zone and the button itself for
-        # ``REVEAL_HIDE_DELAY_MS``. Restarted whenever the mouse touches
-        # either widget.
-        self._reveal_hide_timer = QTimer(self)
-        self._reveal_hide_timer.setSingleShot(True)
-        self._reveal_hide_timer.setInterval(REVEAL_HIDE_DELAY_MS)
-        self._reveal_hide_timer.timeout.connect(self._maybe_hide_reveal)
-
         status = QStatusBar()
         self.setStatusBar(status)
         self._status_label = QLabel("Hazır")
@@ -323,6 +241,10 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self._on_add_camera)
         QShortcut(QKeySequence("Ctrl+,"), self, activated=self._on_open_settings)
+        # Sidebar toggle: F10 is the primary shortcut (single key, easy
+        # to hit when the sidebar is fully hidden and there's no visible
+        # UI to click on). Ctrl+B kept as an alias for muscle memory.
+        QShortcut(QKeySequence("F10"), self, activated=self._toggle_sidebar)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=self._toggle_sidebar)
         QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
 
@@ -378,31 +300,26 @@ class MainWindow(QMainWindow):
 
     def _apply_collapsed_state(self) -> None:
         # "Collapsed" is now equivalent to "fully hidden" — the sidebar
-        # disappears, the grid claims the full width, and the edge
-        # trigger arms to reveal it on hover. The historical middle
-        # state (a 56 px chevron column) was removed in this pass
-        # because the user asked for maximum viewing area.
-        if self._collapsed:
-            self.sidebar.hide()
-            self._edge_trigger.show()
-            self._edge_trigger.raise_()
-            self._update_edge_geometry()
-        else:
-            self.sidebar.show()
+        # disappears entirely and the grid claims the full width. The
+        # only way back is the keyboard shortcut (F10 or Ctrl+B). The
+        # historical middle state (a 56 px chevron column) and the
+        # edge-hover reveal were dropped because the user wanted a
+        # totally clean fullscreen viewing area with no floating UI.
+        self.sidebar.setVisible(not self._collapsed)
+        if not self._collapsed:
             self.sidebar.setFixedWidth(SIDEBAR_WIDTH)
-            self._edge_trigger.hide()
-            self._reveal_btn.hide()
-            self._reveal_hide_timer.stop()
 
         self.body_widget.setVisible(not self._collapsed)
         self.title_label.setVisible(not self._collapsed)
         # Custom-painted chevron stays perfectly centred regardless of font.
         self.toggle_btn.set_collapsed(self._collapsed)
         self.toggle_btn.setToolTip(
-            "Kenar çubuğunu gizle" if not self._collapsed else "Kenar çubuğunu göster"
+            "Kenar çubuğunu gizle (F10)"
+            if not self._collapsed
+            else "Kenar çubuğunu göster (F10)"
         )
-        # Rebuild the header row so the toggle button is flush-left with
-        # the title when the sidebar is open.
+        # Rebuild the header row so the toggle button is flush-left
+        # with the title when the sidebar is open.
         while self._header_row.count():
             self._header_row.takeAt(0)
         self._header_row.addWidget(self.toggle_btn, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -413,71 +330,6 @@ class MainWindow(QMainWindow):
         self._config.settings.sidebar_collapsed = self._collapsed
         self._save()
         self._apply_collapsed_state()
-
-    def _reveal_sidebar(self) -> None:
-        """Re-open the sidebar from the floating chevron."""
-        if not self._collapsed:
-            return
-        self._collapsed = False
-        self._config.settings.sidebar_collapsed = False
-        self._save()
-        self._apply_collapsed_state()
-
-    # -- edge-hover reveal ---------------------------------------------
-
-    def _update_edge_geometry(self) -> None:
-        """Recalculate the trigger + reveal button positions."""
-        central = self.centralWidget()
-        if central is None:
-            return
-        h = central.height()
-        # Trigger fills the full window height along the left edge.
-        self._edge_trigger.setGeometry(0, 0, EDGE_TRIGGER_WIDTH, h)
-        # Reveal button sits half-way down, flush-left, only when the
-        # sidebar is hidden.
-        btn_y = max(0, (h - REVEAL_BUTTON_HEIGHT) // 2)
-        self._reveal_btn.setGeometry(
-            0, btn_y, REVEAL_BUTTON_WIDTH, REVEAL_BUTTON_HEIGHT
-        )
-        self._reveal_btn.raise_()
-
-    def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        # Show / hide the reveal chevron based on mouse entry into the
-        # trigger strip (hover events, since the strip lets real clicks
-        # pass through to the grid) and the button itself (normal
-        # Enter/Leave, since the button is clickable).
-        if obj is self._edge_trigger:
-            t = event.type()
-            if t == QEvent.Type.HoverEnter or t == QEvent.Type.Enter:
-                self._show_reveal_button()
-            elif t == QEvent.Type.HoverLeave or t == QEvent.Type.Leave:
-                self._reveal_hide_timer.start()
-        elif obj is self._reveal_btn:
-            if event.type() == QEvent.Type.Enter:
-                self._reveal_hide_timer.stop()
-            elif event.type() == QEvent.Type.Leave:
-                self._reveal_hide_timer.start()
-        return super().eventFilter(obj, event)
-
-    def _show_reveal_button(self) -> None:
-        if not self._collapsed:
-            return
-        self._reveal_hide_timer.stop()
-        self._update_edge_geometry()
-        self._reveal_btn.show()
-        self._reveal_btn.raise_()
-
-    def _maybe_hide_reveal(self) -> None:
-        # Only hide if the mouse is not currently inside either widget.
-        if self._reveal_btn.underMouse() or self._edge_trigger.underMouse():
-            self._reveal_hide_timer.start()
-            return
-        self._reveal_btn.hide()
-
-    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802
-        super().resizeEvent(event)
-        if self._collapsed:
-            self._update_edge_geometry()
 
     # -- fullscreen + display ------------------------------------------
 

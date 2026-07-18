@@ -92,10 +92,11 @@ Uygulama bu URL'i girdiğiniz alanlardan otomatik üretir; isterseniz "Özel RTS
 
 | Kısayol     | İşlev                       |
 |-------------|-----------------------------|
-| `Esc`       | Tam ekrandan grid'e dön     |
-| `Ctrl+N`    | Yeni kamera ekle            |
-| `Ctrl+,`    | Ayarları aç                 |
-| `Ctrl+B`    | Sol menüyü daralt/genişlet  |
+| `Esc`         | Tam ekrandan grid'e dön         |
+| `Ctrl+N`      | Yeni kamera ekle                |
+| `Ctrl+,`      | Ayarları aç                     |
+| `F10` / `Ctrl+B` | Sol menüyü gizle / göster    |
+| `F11`         | Pencereyi tam ekran yap / geri  |
 
 > **İpucu — kameraları tek tuşla gizle**: sol menüdeki kart üzerinde **göz simgesi** vardır. Bir tık ile kamerayı ızgaradan çıkarır (RTSP akışı durdurulur), tekrar tık ile geri getirir. Kart sol menüde *"Gizli"* yazısı ve üzeri çizili göz simgesi ile durmaya devam eder, böylece istediğiniz an geri açabilirsiniz.
 
