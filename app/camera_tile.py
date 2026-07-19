@@ -19,7 +19,6 @@ from PyQt6.QtGui import (
     QImage,
     QMouseEvent,
     QPainter,
-    QPainterPath,
     QPaintEvent,
     QPen,
     QPixmap,
@@ -431,22 +430,20 @@ class CameraTile(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
 
-        radius = 14
-        # Inset the rect by half the (eventual) pen width so the border stays
-        # entirely inside the widget's geometry — otherwise the 2 px selection
-        # outline bleeds outside the rounded corners and clips against the
-        # neighbouring tile.
+        # Square (no corner radius) tiles — NVR-style clean rectangles.
+        # Inset the drawable rect by half the (eventual) pen width so
+        # the selection outline lives entirely inside the widget's
+        # geometry and doesn't bleed against the neighbouring tile.
         pen_width = 2 if self._selected else 1
         inset = pen_width / 2.0
         rect = QRectF(self.rect()).adjusted(inset, inset, -inset, -inset)
-        inner_radius = radius - inset
 
-        # Background card.
+        # Background fill.
         painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor("#0e0e10"))
-        painter.drawRoundedRect(rect, inner_radius, inner_radius)
+        painter.drawRect(rect)
 
-        painter.setClipPath(self._rounded_path(rect, inner_radius))
+        painter.setClipRect(rect)
 
         if self._pixmap is not None and not self._pixmap.isNull():
             self._draw_video(painter, rect)
@@ -454,8 +451,6 @@ class CameraTile(QWidget):
             self._draw_placeholder(painter, rect)
 
         if self._show_overlay:
-            # Draw the overlay while still clipped so the chip can never
-            # extend past the rounded corners.
             self._draw_overlay(painter, rect)
 
         painter.setClipping(False)
@@ -463,15 +458,10 @@ class CameraTile(QWidget):
         # Border (highlighted when selected).
         pen = QPen(QColor("#0a84ff" if self._selected else "#2c2c2e"))
         pen.setWidth(pen_width)
-        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        pen.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(rect, inner_radius, inner_radius)
-
-    def _rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
-        path = QPainterPath()
-        path.addRoundedRect(rect, radius, radius)
-        return path
+        painter.drawRect(rect)
 
     def _draw_video(self, painter: QPainter, rect: QRectF) -> None:
         assert self._pixmap is not None

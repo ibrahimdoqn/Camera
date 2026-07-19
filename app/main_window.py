@@ -1,6 +1,8 @@
 """Main application window: collapsible sidebar + camera grid."""
 from __future__ import annotations
 
+from typing import Optional
+
 from PyQt6.QtCore import QPoint, QPointF, QSize, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
@@ -230,12 +232,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.grid, 1)
         self.setCentralWidget(central)
 
-        status = QStatusBar()
-        self.setStatusBar(status)
+        self._status_bar = QStatusBar()
+        self.setStatusBar(self._status_bar)
         self._status_label = QLabel("Hazır")
-        status.addWidget(self._status_label)
+        self._status_bar.addWidget(self._status_label)
         self._resource_monitor = ResourceMonitor()
-        status.addPermanentWidget(self._resource_monitor)
+        self._status_bar.addPermanentWidget(self._resource_monitor)
+
+        # Remembers what the chrome (sidebar + status bar) state was
+        # right before we auto-hid it for fullscreen, so exiting F11
+        # can restore the user's preference. ``None`` means the user
+        # is not currently in an auto-hide-driven fullscreen.
+        self._chrome_before_fs: Optional[bool] = None
 
         # Shortcuts.
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._on_escape)
@@ -299,24 +307,23 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_collapsed_state(self) -> None:
-        # "Collapsed" is now equivalent to "fully hidden" — the sidebar
-        # disappears entirely and the grid claims the full width. The
-        # only way back is the keyboard shortcut (F10 or Ctrl+B). The
-        # historical middle state (a 56 px chevron column) and the
-        # edge-hover reveal were dropped because the user wanted a
-        # totally clean fullscreen viewing area with no floating UI.
+        # ``self._collapsed`` is the single truth for "chrome hidden" —
+        # NVR-style full-view. When True, both the left sidebar and the
+        # bottom status bar disappear so only the camera grid is on
+        # screen. F10 (or Ctrl+B) toggles it; F11 auto-triggers it
+        # while in fullscreen.
         self.sidebar.setVisible(not self._collapsed)
+        self._status_bar.setVisible(not self._collapsed)
         if not self._collapsed:
             self.sidebar.setFixedWidth(SIDEBAR_WIDTH)
 
         self.body_widget.setVisible(not self._collapsed)
         self.title_label.setVisible(not self._collapsed)
-        # Custom-painted chevron stays perfectly centred regardless of font.
         self.toggle_btn.set_collapsed(self._collapsed)
         self.toggle_btn.setToolTip(
-            "Kenar çubuğunu gizle (F10)"
+            "Arayüzü gizle (F10)"
             if not self._collapsed
-            else "Kenar çubuğunu göster (F10)"
+            else "Arayüzü göster (F10)"
         )
         # Rebuild the header row so the toggle button is flush-left
         # with the title when the sidebar is open.
@@ -329,6 +336,9 @@ class MainWindow(QMainWindow):
         self._collapsed = not self._collapsed
         self._config.settings.sidebar_collapsed = self._collapsed
         self._save()
+        # A manual toggle inside fullscreen counts as "user knows what
+        # they want", so cancel the auto-restore-on-exit.
+        self._chrome_before_fs = None
         self._apply_collapsed_state()
 
     # -- fullscreen + display ------------------------------------------
@@ -336,7 +346,22 @@ class MainWindow(QMainWindow):
     def _toggle_fullscreen(self) -> None:
         if self.isFullScreen():
             self.showNormal()
+            # Auto-restore whatever chrome state the user had before
+            # they entered fullscreen (unless they manually pressed
+            # F10 while in fullscreen, in which case ``_chrome_before_fs``
+            # was cleared and we leave the current state alone).
+            if self._chrome_before_fs is not None:
+                self._collapsed = self._chrome_before_fs
+                self._chrome_before_fs = None
+                self._apply_collapsed_state()
         else:
+            # Remember the current chrome state and hide it for the
+            # NVR-style immersive fullscreen. Don't persist this to
+            # config — it's a runtime override, not a preference.
+            self._chrome_before_fs = self._collapsed
+            if not self._collapsed:
+                self._collapsed = True
+                self._apply_collapsed_state()
             self.showFullScreen()
 
     def apply_display_settings(self) -> None:

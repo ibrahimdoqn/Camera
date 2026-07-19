@@ -22,7 +22,12 @@ class AspectGrid(QWidget):
     """Lays out children in a grid, keeping each cell at a fixed aspect ratio."""
 
     def __init__(self, parent: Optional[QWidget] = None, aspect: float = 16 / 9,
-                 columns: int = 2, spacing: int = 12, margin: int = 12) -> None:
+                 columns: int = 2, spacing: int = 4, margin: int = 4) -> None:
+        # NVR-style compact defaults — 4 px hairline gap between tiles and
+        # a matching outer margin. The previous 12 px values gave the
+        # window a "desktop app" feel with a lot of visible black; users
+        # who mount this on a secondary monitor for security review want
+        # the tiles to fill as much screen as possible.
         super().__init__(parent)
         self._tiles: list[QWidget] = []
         self._aspect = aspect
@@ -114,7 +119,9 @@ class CameraGrid(QWidget):
         self._stack.setContentsMargins(0, 0, 0, 0)
 
         self._grid_host = AspectGrid(columns=settings.grid_columns)
-        self._max_host = AspectGrid(columns=1)
+        # Single-tile maximize: zero margin/spacing so the frame goes
+        # edge-to-edge in the window (proper "full-view" mode).
+        self._max_host = AspectGrid(columns=1, spacing=0, margin=0)
 
         self._stack.addWidget(self._grid_host)
         self._stack.addWidget(self._max_host)
